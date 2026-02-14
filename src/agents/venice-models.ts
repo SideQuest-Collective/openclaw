@@ -300,10 +300,10 @@ export function buildVeniceModelDefinition(entry: VeniceCatalogEntry): ModelDefi
     cost: VENICE_DEFAULT_COST,
     contextWindow: entry.contextWindow,
     maxTokens: entry.maxTokens,
-    // Disable streaming by default for Venice to avoid SDK crash with usage-only chunks
+    // Avoid usage-only streaming chunks that can break OpenAI-compatible parsers.
     // See: https://github.com/openclaw/openclaw/issues/15819
-    params: {
-      streaming: false,
+    compat: {
+      supportsUsageInStreaming: false,
     },
   };
 }
@@ -386,9 +386,9 @@ export async function discoverVeniceModels(): Promise<ModelDefinitionConfig[]> {
           cost: VENICE_DEFAULT_COST,
           contextWindow: apiModel.model_spec.availableContextTokens || 128000,
           maxTokens: 8192,
-          // Disable streaming to avoid SDK crash with usage-only chunks (#15819)
-          params: {
-            streaming: false,
+          // Avoid usage-only streaming chunks that can break OpenAI-compatible parsers.
+          compat: {
+            supportsUsageInStreaming: false,
           },
         });
       }
