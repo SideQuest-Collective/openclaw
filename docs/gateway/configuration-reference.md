@@ -126,7 +126,7 @@ WhatsApp runs through the gateway's web channel (Baileys Web). It starts automat
         { command: "generate", description: "Create an image" },
       ],
       historyLimit: 50,
-      replyToMode: "first", // off | first | all
+      replyToMode: "off", // off | first | all
       linkPreview: true,
       streamMode: "partial", // off | partial | block
       draftChunk: {
