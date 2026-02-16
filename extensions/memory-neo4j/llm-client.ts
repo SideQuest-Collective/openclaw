@@ -165,13 +165,19 @@ export async function callOpenRouterStream(
  * Check if an error is transient (network/timeout) vs permanent (JSON parse, etc.)
  */
 export function isTransientError(err: unknown): boolean {
-  if (!(err instanceof Error)) {
+  if (!err || typeof err !== "object") {
     return false;
   }
-  const msg = err.message.toLowerCase();
+  const name =
+    typeof (err as { name?: unknown }).name === "string" ? (err as { name: string }).name : "";
+  const message =
+    typeof (err as { message?: unknown }).message === "string"
+      ? (err as { message: string }).message
+      : "";
+  const msg = message.toLowerCase();
   return (
-    err.name === "AbortError" ||
-    err.name === "TimeoutError" ||
+    name === "AbortError" ||
+    name === "TimeoutError" ||
     msg.includes("timeout") ||
     msg.includes("econnrefused") ||
     msg.includes("econnreset") ||

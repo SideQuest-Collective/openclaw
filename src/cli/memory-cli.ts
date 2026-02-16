@@ -384,10 +384,19 @@ export async function runMemoryStatus(opts: MemoryCommandOptions) {
     const chunksIndexed = status.chunks ?? 0;
     const totalFiles = scan?.totalFiles ?? null;
 
-    // Skip agents with no indexed content (0 files, 0 chunks, no source files, no errors).
-    // These agents aren't using the core memory search system — no need to show them.
+    const hasDiagnostics =
+      status.dirty ||
+      Boolean(status.fallback) ||
+      Boolean(status.vector?.loadError) ||
+      (status.vector?.enabled === true && status.vector.available === false) ||
+      Boolean(status.fts?.error);
+    // Skip agents with no indexed content only when there are no relevant status diagnostics.
     const isEmpty =
-      status.files === 0 && status.chunks === 0 && (totalFiles ?? 0) === 0 && !indexError;
+      status.files === 0 &&
+      status.chunks === 0 &&
+      (totalFiles ?? 0) === 0 &&
+      !indexError &&
+      !hasDiagnostics;
     if (isEmpty) {
       emptyAgentIds.push(agentId);
       continue;

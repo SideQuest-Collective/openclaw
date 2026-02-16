@@ -34,9 +34,12 @@ export function hasControlCommand(
       if (lowered === normalized) {
         return true;
       }
+      if (lowered === `${normalized}:`) {
+        return true;
+      }
       if (command.acceptsArgs && lowered.startsWith(normalized)) {
         const nextChar = normalizedBody.charAt(normalized.length);
-        if (nextChar && /\s/.test(nextChar)) {
+        if (nextChar === ":" || (nextChar && /\s/.test(nextChar))) {
           return true;
         }
       }

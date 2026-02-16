@@ -99,7 +99,8 @@ Text + native (when enabled):
 - `/reasoning on|off|stream` (alias: `/reason`; when on, sends a separate message prefixed `Reasoning:`; `stream` = Telegram draft only)
 - `/elevated on|off|ask|full` (alias: `/elev`; `full` skips exec approvals)
 - `/exec host=<sandbox|gateway|node> security=<deny|allowlist|full> ask=<off|on-miss|always> node=<id>` (send `/exec` to show current)
-- `/model <name>` (alias: `/models`; or `/<alias>` from `agents.defaults.models.*.alias`)
+- `/model <name>` (alias: `.model`; or `/<alias>` from `agents.defaults.models.*.alias`)
+- `/models [provider]` (alias: `.models`)
 - `/queue <mode>` (plus options like `debounce:2s cap:25 drop:summarize`; send `/queue` to see current settings)
 - `/bash <command>` (host-only; alias for `! <command>`; requires `commands.bash: true` + `tools.elevated` allowlists)
 

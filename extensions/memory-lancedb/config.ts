@@ -26,6 +26,7 @@ export type MemoryConfig = {
   /** @deprecated Use autoCapture object instead. Boolean true enables with defaults. */
   autoCapture?: boolean | AutoCaptureConfig;
   autoRecall?: boolean;
+  captureMaxChars?: number;
   coreMemory?: {
     enabled?: boolean;
     /** Maximum number of core memories to load */
@@ -46,6 +47,7 @@ export const MEMORY_CATEGORIES = [
 export type MemoryCategory = (typeof MEMORY_CATEGORIES)[number];
 
 const DEFAULT_MODEL = "text-embedding-3-small";
+export const DEFAULT_CAPTURE_MAX_CHARS = 500;
 const LEGACY_STATE_DIRS: string[] = [];
 
 function resolveDefaultDbPath(): string {
@@ -120,7 +122,7 @@ export const memoryConfigSchema = {
     const cfg = value as Record<string, unknown>;
     assertAllowedKeys(
       cfg,
-      ["embedding", "dbPath", "autoCapture", "autoRecall", "coreMemory"],
+      ["embedding", "dbPath", "autoCapture", "autoRecall", "captureMaxChars", "coreMemory"],
       "memory config",
     );
 
@@ -132,12 +134,21 @@ export const memoryConfigSchema = {
 
     const model = resolveEmbeddingModel(embedding);
 
+    const captureMaxChars =
+      typeof cfg.captureMaxChars === "number" ? Math.floor(cfg.captureMaxChars) : undefined;
+    if (
+      typeof captureMaxChars === "number" &&
+      (captureMaxChars < 100 || captureMaxChars > 10_000)
+    ) {
+      throw new Error("captureMaxChars must be between 100 and 10000");
+    }
+
     // Parse autoCapture (supports boolean for backward compat, or object for LLM config)
     let autoCapture: MemoryConfig["autoCapture"];
-    if (cfg.autoCapture === false) {
+    if (cfg.autoCapture === false || cfg.autoCapture === undefined) {
       autoCapture = false;
-    } else if (cfg.autoCapture === true || cfg.autoCapture === undefined) {
-      // Legacy boolean or default — enable with defaults
+    } else if (cfg.autoCapture === true) {
+      // Legacy boolean true — enable with defaults
       autoCapture = { enabled: true };
     } else if (typeof cfg.autoCapture === "object" && !Array.isArray(cfg.autoCapture)) {
       const ac = cfg.autoCapture as Record<string, unknown>;
@@ -176,8 +187,9 @@ export const memoryConfigSchema = {
         apiKey: resolveEnvVars(embedding.apiKey),
       },
       dbPath: typeof cfg.dbPath === "string" ? cfg.dbPath : DEFAULT_DB_PATH,
-      autoCapture: autoCapture ?? { enabled: true },
+      autoCapture: autoCapture ?? false,
       autoRecall: cfg.autoRecall !== false,
+      captureMaxChars: captureMaxChars ?? DEFAULT_CAPTURE_MAX_CHARS,
       // Default coreMemory to enabled for consistency with autoCapture/autoRecall
       coreMemory: coreMemory ?? { enabled: true, maxEntries: 50, minImportance: 0.5 },
     };

@@ -15,8 +15,8 @@ afterEach(() => {
 
 function extractDocumentedSlashCommands(markdown: string): Set<string> {
   const documented = new Set<string>();
-  for (const match of markdown.matchAll(/`\/(?!<)([a-z0-9_-]+)/gi)) {
-    documented.add(`/${match[1]}`);
+  for (const match of markdown.matchAll(/`([/.])(?!<)([a-z0-9_-]+)/gi)) {
+    documented.add(`${match[1]}${match[2]}`);
   }
   return documented;
 }
