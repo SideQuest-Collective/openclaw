@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { describe, expect, test } from "vitest";
 import {
   approveDevicePairing,
+  clearDevicePairing,
   getPairedDevice,
   removePairedDevice,
   requestDevicePairing,
@@ -199,5 +200,14 @@ describe("device pairing tokens", () => {
     await expect(getPairedDevice("device-1", baseDir)).resolves.toBeNull();
 
     await expect(removePairedDevice("device-1", baseDir)).resolves.toBeNull();
+  });
+
+  test("clears paired device state by device id", async () => {
+    const baseDir = await mkdtemp(join(tmpdir(), "openclaw-device-pairing-"));
+    await setupPairedOperatorDevice(baseDir, ["operator.read"]);
+
+    await expect(clearDevicePairing("device-1", baseDir)).resolves.toBe(true);
+    await expect(getPairedDevice("device-1", baseDir)).resolves.toBeNull();
+    await expect(clearDevicePairing("device-1", baseDir)).resolves.toBe(false);
   });
 });
