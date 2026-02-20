@@ -112,6 +112,34 @@ describe("gateway auth", () => {
     expect(mismatch.reason).toBe("token_mismatch");
   });
 
+  it("accepts Authorization bearer token when connect auth token is missing", async () => {
+    const res = await authorizeGatewayConnect({
+      auth: { mode: "token", token: "secret", allowTailscale: false },
+      connectAuth: null,
+      req: {
+        headers: {
+          authorization: "Bearer secret",
+        },
+      } as never,
+    });
+    expect(res.ok).toBe(true);
+    expect(res.method).toBe("token");
+  });
+
+  it("accepts Authorization bearer token when connect auth token mismatches", async () => {
+    const res = await authorizeGatewayConnect({
+      auth: { mode: "token", token: "secret", allowTailscale: false },
+      connectAuth: { token: "stale-token" },
+      req: {
+        headers: {
+          authorization: "Bearer secret",
+        },
+      } as never,
+    });
+    expect(res.ok).toBe(true);
+    expect(res.method).toBe("token");
+  });
+
   it("reports missing token config reason", async () => {
     const res = await authorizeGatewayConnect({
       auth: { mode: "token", allowTailscale: false },

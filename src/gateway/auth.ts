@@ -68,6 +68,27 @@ function headerValue(value: string | string[] | undefined): string | undefined {
   return Array.isArray(value) ? value[0] : value;
 }
 
+function parseBearerToken(value: string | undefined): string | undefined {
+  const raw = value?.trim();
+  if (!raw) {
+    return undefined;
+  }
+  const [scheme, ...rest] = raw.split(/\s+/);
+  if (!scheme || scheme.toLowerCase() !== "bearer" || rest.length === 0) {
+    return undefined;
+  }
+  const token = rest.join(" ").trim();
+  return token || undefined;
+}
+
+function resolveRequestToken(req?: IncomingMessage): string | undefined {
+  if (!req) {
+    return undefined;
+  }
+  const authorization = headerValue(req.headers?.authorization);
+  return parseBearerToken(authorization);
+}
+
 function resolveTailscaleClientIp(req?: IncomingMessage): string | undefined {
   if (!req) {
     return undefined;
@@ -395,11 +416,16 @@ export async function authorizeGatewayConnect(params: {
     if (!auth.token) {
       return { ok: false, reason: "token_missing_config" };
     }
-    if (!connectAuth?.token) {
+    const requestToken = resolveRequestToken(req);
+    if (!connectAuth?.token && !requestToken) {
       limiter?.recordFailure(ip, rateLimitScope);
       return { ok: false, reason: "token_missing" };
     }
-    if (!safeEqualSecret(connectAuth.token, auth.token)) {
+    const connectTokenOk = connectAuth?.token
+      ? safeEqualSecret(connectAuth.token, auth.token)
+      : false;
+    const requestTokenOk = requestToken ? safeEqualSecret(requestToken, auth.token) : false;
+    if (!connectTokenOk && !requestTokenOk) {
       limiter?.recordFailure(ip, rateLimitScope);
       return { ok: false, reason: "token_mismatch" };
     }
