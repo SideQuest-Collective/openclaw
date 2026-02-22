@@ -363,6 +363,32 @@ describe("gateway server auth/connect", () => {
       await expectMissingScopeAfterConnect(port, { device: null });
     });
 
+    test("allows gateway-client scopes without device when override env is enabled", async () => {
+      await withEnvAsync(
+        { OPENCLAW_ALLOW_GATEWAY_CLIENT_SCOPES_WITHOUT_DEVICE: "true" },
+        async () => {
+          const ws = await openWs(port);
+          try {
+            const res = await connectReq(ws, {
+              device: null,
+              scopes: ["operator.write"],
+              client: {
+                id: GATEWAY_CLIENT_NAMES.GATEWAY_CLIENT,
+                version: "1.0.0",
+                platform: "test",
+                mode: GATEWAY_CLIENT_MODES.BACKEND,
+              },
+            });
+            expect(res.ok).toBe(true);
+            const status = await rpcReq(ws, "status");
+            expect(status.ok).toBe(true);
+          } finally {
+            ws.close();
+          }
+        },
+      );
+    });
+
     test("allows health when scopes are empty", async () => {
       const ws = await openWs(port);
       try {

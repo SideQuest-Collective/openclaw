@@ -90,6 +90,27 @@ function headerValue(value: string | string[] | undefined): string | undefined {
   return Array.isArray(value) ? value[0] : value;
 }
 
+function parseBearerToken(value: string | undefined): string | undefined {
+  const raw = value?.trim();
+  if (!raw) {
+    return undefined;
+  }
+  const [scheme, ...rest] = raw.split(/\s+/);
+  if (!scheme || scheme.toLowerCase() !== "bearer" || rest.length === 0) {
+    return undefined;
+  }
+  const token = rest.join(" ").trim();
+  return token || undefined;
+}
+
+function resolveRequestToken(req?: IncomingMessage): string | undefined {
+  if (!req) {
+    return undefined;
+  }
+  const authorization = headerValue(req.headers?.authorization);
+  return parseBearerToken(authorization);
+}
+
 const TAILSCALE_TRUSTED_PROXIES = ["127.0.0.1", "::1"] as const;
 
 function resolveTailscaleClientIp(req?: IncomingMessage): string | undefined {
