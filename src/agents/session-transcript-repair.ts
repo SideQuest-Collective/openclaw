@@ -146,6 +146,76 @@ export function sanitizeToolUseResultPairing(messages: AgentMessage[]): AgentMes
   return repairToolUseResultPairing(messages).messages;
 }
 
+export type OpenAIToolResultPruneReport = {
+  messages: AgentMessage[];
+  droppedOrphanCount: number;
+  droppedDuplicateCount: number;
+};
+
+/**
+ * Drop tool results that cannot be replayed as OpenAI Responses function_call_output items.
+ *
+ * OpenAI requires each function_call_output to reference a function_call that already exists
+ * earlier in the replay payload. Aborted/errored assistant turns are intentionally skipped during
+ * replay, so any toolResult tied to those turns must be removed beforehand.
+ */
+export function pruneUnpairedToolResultsForOpenAI(
+  messages: AgentMessage[],
+): OpenAIToolResultPruneReport {
+  const seenReplayableToolCallIds = new Set<string>();
+  const seenToolResultIds = new Set<string>();
+  const out: AgentMessage[] = [];
+  let droppedOrphanCount = 0;
+  let droppedDuplicateCount = 0;
+  let changed = false;
+
+  for (const msg of messages) {
+    if (!msg || typeof msg !== "object") {
+      out.push(msg);
+      continue;
+    }
+
+    const role = (msg as { role?: unknown }).role;
+    if (role === "assistant") {
+      const assistant = msg as Extract<AgentMessage, { role: "assistant" }>;
+      const stopReason = (assistant as { stopReason?: string }).stopReason;
+      if (stopReason !== "error" && stopReason !== "aborted") {
+        for (const call of extractToolCallsFromAssistant(assistant)) {
+          seenReplayableToolCallIds.add(call.id);
+        }
+      }
+      out.push(msg);
+      continue;
+    }
+
+    if (role === "toolResult") {
+      const toolResult = msg as Extract<AgentMessage, { role: "toolResult" }>;
+      const id = extractToolResultId(toolResult);
+      if (!id || !seenReplayableToolCallIds.has(id)) {
+        droppedOrphanCount += 1;
+        changed = true;
+        continue;
+      }
+      if (seenToolResultIds.has(id)) {
+        droppedDuplicateCount += 1;
+        changed = true;
+        continue;
+      }
+      seenToolResultIds.add(id);
+      out.push(msg);
+      continue;
+    }
+
+    out.push(msg);
+  }
+
+  return {
+    messages: changed ? out : messages,
+    droppedOrphanCount,
+    droppedDuplicateCount,
+  };
+}
+
 export type ToolUseRepairReport = {
   messages: AgentMessage[];
   added: Array<Extract<AgentMessage, { role: "toolResult" }>>;

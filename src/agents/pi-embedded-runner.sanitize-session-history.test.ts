@@ -183,6 +183,34 @@ describe("sanitizeSessionHistory", () => {
     expect(result[0]?.role).toBe("assistant");
   });
 
+  it("drops orphaned toolResult entries from aborted assistant turns for openai-responses", async () => {
+    const messages = [
+      {
+        role: "assistant",
+        stopReason: "aborted",
+        content: [{ type: "toolCall", id: "toolu_abort_1", name: "exec", arguments: {} }],
+      },
+      {
+        role: "toolResult",
+        toolCallId: "toolu_abort_1",
+        toolName: "exec",
+        content: [{ type: "text", text: "synthetic error result" }],
+        isError: true,
+      },
+      { role: "user", content: "retry" },
+    ] as unknown as AgentMessage[];
+
+    const result = await sanitizeSessionHistory({
+      messages,
+      modelApi: "openai-responses",
+      provider: "openai",
+      sessionManager: mockSessionManager,
+      sessionId: TEST_SESSION_ID,
+    });
+
+    expect(result.map((msg) => msg.role)).toEqual(["assistant", "user"]);
+  });
+
   it("drops malformed tool calls missing input or arguments", async () => {
     const messages = [
       {

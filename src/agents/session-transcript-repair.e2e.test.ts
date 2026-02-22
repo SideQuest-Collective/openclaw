@@ -1,6 +1,7 @@
 import type { AgentMessage } from "@mariozechner/pi-agent-core";
 import { describe, expect, it } from "vitest";
 import {
+  pruneUnpairedToolResultsForOpenAI,
   sanitizeToolCallInputs,
   sanitizeToolUseResultPairing,
   repairToolUseResultPairing,
@@ -198,6 +199,62 @@ describe("sanitizeToolUseResultPairing", () => {
     expect(result.messages[1]?.role).toBe("user");
     // No synthetic results should be added
     expect(result.added).toHaveLength(0);
+  });
+});
+
+describe("pruneUnpairedToolResultsForOpenAI", () => {
+  it("drops tool results tied to aborted assistant tool calls", () => {
+    const input = [
+      {
+        role: "assistant",
+        stopReason: "aborted",
+        content: [{ type: "toolCall", id: "toolu_abort_1", name: "exec", arguments: {} }],
+      },
+      {
+        role: "toolResult",
+        toolCallId: "toolu_abort_1",
+        toolName: "exec",
+        content: [{ type: "text", text: "synthetic" }],
+        isError: true,
+      },
+      {
+        role: "user",
+        content: "retry",
+      },
+    ] as unknown as AgentMessage[];
+
+    const out = pruneUnpairedToolResultsForOpenAI(input);
+    expect(out.droppedOrphanCount).toBe(1);
+    expect(out.messages.map((m) => m.role)).toEqual(["assistant", "user"]);
+  });
+
+  it("keeps paired tool results and drops duplicates", () => {
+    const input = [
+      {
+        role: "assistant",
+        stopReason: "toolUse",
+        content: [{ type: "toolCall", id: "call_1|fc_1", name: "read", arguments: {} }],
+      },
+      {
+        role: "toolResult",
+        toolCallId: "call_1|fc_1",
+        toolName: "read",
+        content: [{ type: "text", text: "ok" }],
+        isError: false,
+      },
+      {
+        role: "toolResult",
+        toolCallId: "call_1|fc_1",
+        toolName: "read",
+        content: [{ type: "text", text: "dup" }],
+        isError: false,
+      },
+    ] as unknown as AgentMessage[];
+
+    const out = pruneUnpairedToolResultsForOpenAI(input);
+    expect(out.droppedOrphanCount).toBe(0);
+    expect(out.droppedDuplicateCount).toBe(1);
+    expect(out.messages.map((m) => m.role)).toEqual(["assistant", "toolResult"]);
   });
 });
 
