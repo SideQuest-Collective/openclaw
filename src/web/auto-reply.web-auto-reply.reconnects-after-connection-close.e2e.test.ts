@@ -1,4 +1,5 @@
 import { beforeAll, describe, expect, it, vi } from "vitest";
+import type { WebInboundMessage } from "./inbound.js";
 import { escapeRegExp, formatEnvelopeTimestamp } from "../../test/helpers/envelope-timestamp.js";
 import {
   installWebAutoReplyTestHomeHooks,
@@ -6,7 +7,6 @@ import {
   makeSessionStore,
   setLoadConfigMock,
 } from "./auto-reply.test-harness.js";
-import type { WebInboundMessage } from "./inbound.js";
 
 installWebAutoReplyTestHomeHooks();
 
@@ -119,6 +119,45 @@ describe("web auto-reply", () => {
     await Promise.resolve();
     await run;
   });
+
+  it("retries when listener startup fails", async () => {
+    const closeResolvers: Array<(reason?: unknown) => void> = [];
+    const sleep = vi.fn(async () => {});
+    const listenerFactory = vi
+      .fn()
+      .mockRejectedValueOnce(
+        Object.assign(new Error("Timed out waiting for WhatsApp connection after 45000ms"), {
+          status: 408,
+        }),
+      )
+      .mockImplementation(async () => {
+        let resolveClose: (reason?: unknown) => void = () => {};
+        const onClose = new Promise<unknown>((res) => {
+          resolveClose = res;
+        });
+        closeResolvers.push(resolveClose);
+        return { close: vi.fn(), onClose };
+      });
+    const { runtime, controller, run } = startMonitorWebChannel({
+      monitorWebChannelFn: monitorWebChannel as never,
+      listenerFactory,
+      sleep,
+    });
+
+    await vi.waitFor(
+      () => {
+        expect(listenerFactory).toHaveBeenCalledTimes(2);
+      },
+      { timeout: 500, interval: 5 },
+    );
+    expect(runtime.error).toHaveBeenCalledWith(expect.stringContaining("connect failed"));
+    expect(runtime.error).toHaveBeenCalledWith(expect.stringContaining("Retry 1"));
+
+    controller.abort();
+    closeResolvers[0]?.();
+    await run;
+  });
+
   it("forces reconnect when watchdog closes without onClose", async () => {
     vi.useFakeTimers();
     try {

@@ -5,9 +5,15 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { resetLogger, setLoggerOverride } from "../logging.js";
 import { baileys, getLastSocket, resetBaileysMocks, resetLoadConfigMock } from "./test-helpers.js";
 
-const { createWaSocket, formatError, logWebSelfId, waitForWaConnection } =
-  await import("./session.js");
+const {
+  createWaSocket,
+  formatError,
+  logWebSelfId,
+  waitForWaConnection,
+  resetBaileysVersionCacheForTests,
+} = await import("./session.js");
 const useMultiFileAuthStateMock = vi.mocked(baileys.useMultiFileAuthState);
+const fetchLatestBaileysVersionMock = vi.mocked(baileys.fetchLatestBaileysVersion);
 
 async function flushCredsUpdate() {
   await new Promise<void>((resolve) => setImmediate(resolve));
@@ -59,6 +65,7 @@ describe("web session", () => {
     vi.clearAllMocks();
     resetBaileysMocks();
     resetLoadConfigMock();
+    resetBaileysVersionCacheForTests();
   });
 
   afterEach(() => {
@@ -104,6 +111,29 @@ describe("web session", () => {
       lastDisconnect: new Error("bye"),
     });
     await expect(promise).rejects.toBeInstanceOf(Error);
+  });
+
+  it("times out when open event does not arrive", async () => {
+    vi.useFakeTimers();
+    const ev = new EventEmitter();
+    const promise = waitForWaConnection(
+      { ev } as unknown as ReturnType<typeof baileys.makeWASocket>,
+      {
+        timeoutMs: 25,
+      },
+    );
+    const rejected = expect(promise).rejects.toMatchObject({
+      status: 408,
+      code: "WA_CONNECT_TIMEOUT",
+    });
+    await vi.advanceTimersByTimeAsync(26);
+    await rejected;
+  });
+
+  it("reuses cached Baileys version between socket creations", async () => {
+    await createWaSocket(false, false);
+    await createWaSocket(false, false);
+    expect(fetchLatestBaileysVersionMock).toHaveBeenCalledTimes(1);
   });
 
   it("logWebSelfId prints cached E.164 when creds exist", () => {

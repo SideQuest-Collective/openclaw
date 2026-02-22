@@ -1,5 +1,6 @@
 import type { AnyMessageContent, proto, WAMessage } from "@whiskeysockets/baileys";
 import { DisconnectReason, isJidGroup } from "@whiskeysockets/baileys";
+import type { WebInboundMessage, WebListenerCloseReason } from "./types.js";
 import { createInboundDebouncer } from "../../auto-reply/inbound-debounce.js";
 import { formatLocationText } from "../../channels/location.js";
 import { logVerbose, shouldLogVerbose } from "../../globals.js";
@@ -20,13 +21,14 @@ import {
 } from "./extract.js";
 import { downloadInboundMedia } from "./media.js";
 import { createWebSendApi } from "./send-api.js";
-import type { WebInboundMessage, WebListenerCloseReason } from "./types.js";
 
 export async function monitorWebInbox(options: {
   verbose: boolean;
   accountId: string;
   authDir: string;
   onMessage: (msg: WebInboundMessage) => Promise<void>;
+  /** Timeout while waiting for a socket to report connection=open. */
+  connectTimeoutMs?: number;
   mediaMaxMb?: number;
   /** Send read receipts for incoming messages (default true). */
   sendReadReceipts?: boolean;
@@ -40,7 +42,7 @@ export async function monitorWebInbox(options: {
   const sock = await createWaSocket(false, options.verbose, {
     authDir: options.authDir,
   });
-  await waitForWaConnection(sock);
+  await waitForWaConnection(sock, { timeoutMs: options.connectTimeoutMs });
   const connectedAtMs = Date.now();
 
   let onCloseResolve: ((reason: WebListenerCloseReason) => void) | null = null;

@@ -1,3 +1,4 @@
+import type { WebChannelStatus, WebInboundMsg, WebMonitorTuning } from "./types.js";
 import { hasControlCommand } from "../../auto-reply/command-detection.js";
 import { resolveInboundDebounceMs } from "../../auto-reply/inbound-debounce.js";
 import { getReplyFromConfig } from "../../auto-reply/reply.js";
@@ -22,13 +23,12 @@ import {
   resolveReconnectPolicy,
   sleepWithAbort,
 } from "../reconnect.js";
-import { formatError, getWebAuthAgeMs, readWebSelfId } from "../session.js";
+import { formatError, getStatusCode, getWebAuthAgeMs, readWebSelfId } from "../session.js";
 import { DEFAULT_WEB_MEDIA_BYTES } from "./constants.js";
 import { whatsappHeartbeatLog, whatsappLog } from "./loggers.js";
 import { buildMentionConfig } from "./mentions.js";
 import { createEchoTracker } from "./monitor/echo.js";
 import { createWebOnMessageHandler } from "./monitor/on-message.js";
-import type { WebChannelStatus, WebInboundMsg, WebMonitorTuning } from "./types.js";
 import { isLikelyWhatsAppCryptoError } from "./util.js";
 
 export async function monitorWebChannel(
@@ -93,6 +93,10 @@ export async function monitorWebChannel(
       ? configuredMaxMb * 1024 * 1024
       : DEFAULT_WEB_MEDIA_BYTES;
   const heartbeatSeconds = resolveHeartbeatSeconds(cfg, tuning.heartbeatSeconds);
+  const connectTimeoutMs =
+    typeof tuning.connectTimeoutMs === "number" && tuning.connectTimeoutMs > 0
+      ? tuning.connectTimeoutMs
+      : 45_000;
   const reconnectPolicy = resolveReconnectPolicy(cfg, tuning.reconnect);
   const baseMentionConfig = buildMentionConfig(cfg);
   const groupHistoryLimit =
@@ -189,24 +193,95 @@ export async function monitorWebChannel(
       return !hasControlCommand(msg.body, cfg);
     };
 
-    const listener = await (listenerFactory ?? monitorWebInbox)({
-      verbose,
-      accountId: account.accountId,
-      authDir: account.authDir,
-      mediaMaxMb: account.mediaMaxMb,
-      sendReadReceipts: account.sendReadReceipts,
-      debounceMs: inboundDebounceMs,
-      shouldDebounce,
-      onMessage: async (msg: WebInboundMsg) => {
-        handledMessages += 1;
-        lastMessageAt = Date.now();
-        status.lastMessageAt = lastMessageAt;
-        status.lastEventAt = lastMessageAt;
-        emitStatus();
-        _lastInboundMsg = msg;
-        await onMessage(msg);
-      },
-    });
+    let listener: Awaited<ReturnType<typeof monitorWebInbox>>;
+    try {
+      listener = await (listenerFactory ?? monitorWebInbox)({
+        verbose,
+        accountId: account.accountId,
+        authDir: account.authDir,
+        connectTimeoutMs,
+        mediaMaxMb: account.mediaMaxMb,
+        sendReadReceipts: account.sendReadReceipts,
+        debounceMs: inboundDebounceMs,
+        shouldDebounce,
+        onMessage: async (msg: WebInboundMsg) => {
+          handledMessages += 1;
+          lastMessageAt = Date.now();
+          status.lastMessageAt = lastMessageAt;
+          status.lastEventAt = lastMessageAt;
+          emitStatus();
+          _lastInboundMsg = msg;
+          await onMessage(msg);
+        },
+      });
+    } catch (err) {
+      const statusCode = getStatusCode(err);
+      const loggedOut = statusCode === 401;
+      const errorStr = formatError(err);
+      status.connected = false;
+      status.lastEventAt = Date.now();
+      status.lastDisconnect = {
+        at: status.lastEventAt,
+        status: typeof statusCode === "number" ? statusCode : undefined,
+        error: errorStr,
+        loggedOut,
+      };
+      status.lastError = errorStr;
+      status.reconnectAttempts = reconnectAttempts;
+      emitStatus();
+      reconnectLogger.warn(
+        {
+          connectionId,
+          status: statusCode ?? "unknown",
+          reconnectAttempts,
+          error: errorStr,
+          connectTimeoutMs,
+        },
+        "web reconnect: listener startup failed",
+      );
+      const connectRoute = resolveAgentRoute({
+        cfg,
+        channel: "whatsapp",
+        accountId: account.accountId,
+      });
+      enqueueSystemEvent(`WhatsApp gateway connect failed (status ${statusCode ?? "unknown"})`, {
+        sessionKey: connectRoute.sessionKey,
+      });
+      if (loggedOut) {
+        runtime.error(
+          `WhatsApp session logged out. Run \`${formatCliCommand("openclaw channels login --channel web")}\` to relink.`,
+        );
+        break;
+      }
+      reconnectAttempts += 1;
+      status.reconnectAttempts = reconnectAttempts;
+      emitStatus();
+      if (reconnectPolicy.maxAttempts > 0 && reconnectAttempts >= reconnectPolicy.maxAttempts) {
+        reconnectLogger.warn(
+          {
+            connectionId,
+            status: statusCode ?? "unknown",
+            reconnectAttempts,
+            maxAttempts: reconnectPolicy.maxAttempts,
+          },
+          "web reconnect: max attempts reached during startup",
+        );
+        runtime.error(
+          `WhatsApp Web reconnect: max attempts reached (${reconnectAttempts}/${reconnectPolicy.maxAttempts}). Stopping web monitoring.`,
+        );
+        break;
+      }
+      const delay = computeBackoff(reconnectPolicy, reconnectAttempts);
+      runtime.error(
+        `WhatsApp Web connect failed (status ${statusCode ?? "unknown"}). Retry ${reconnectAttempts}/${reconnectPolicy.maxAttempts || "∞"} in ${formatDurationPrecise(delay)}… (${errorStr})`,
+      );
+      try {
+        await sleep(delay, abortSignal);
+      } catch {
+        break;
+      }
+      continue;
+    }
 
     status.connected = true;
     status.lastConnectedAt = Date.now();

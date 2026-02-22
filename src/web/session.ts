@@ -1,5 +1,3 @@
-import { randomUUID } from "node:crypto";
-import fsSync from "node:fs";
 import {
   DisconnectReason,
   fetchLatestBaileysVersion,
@@ -7,6 +5,8 @@ import {
   makeWASocket,
   useMultiFileAuthState,
 } from "@whiskeysockets/baileys";
+import { randomUUID } from "node:crypto";
+import fsSync from "node:fs";
 import qrcode from "qrcode-terminal";
 import { formatCliCommand } from "../cli/command-format.js";
 import { danger, success } from "../globals.js";
@@ -32,6 +32,88 @@ export {
 } from "./auth-store.js";
 
 let credsSaveQueue: Promise<void> = Promise.resolve();
+type BaileysVersion = Awaited<ReturnType<typeof fetchLatestBaileysVersion>>["version"];
+const BAILEYS_VERSION_FETCH_TIMEOUT_MS = 5_000;
+const BAILEYS_VERSION_CACHE_TTL_MS = 6 * 60 * 60 * 1000;
+let cachedBaileysVersion: BaileysVersion | null = null;
+let cachedBaileysVersionAt = 0;
+
+export function resetBaileysVersionCacheForTests() {
+  cachedBaileysVersion = null;
+  cachedBaileysVersionAt = 0;
+}
+
+function getCachedBaileysVersion(now = Date.now()): BaileysVersion | null {
+  if (!cachedBaileysVersion) {
+    return null;
+  }
+  if (now - cachedBaileysVersionAt > BAILEYS_VERSION_CACHE_TTL_MS) {
+    return null;
+  }
+  return cachedBaileysVersion;
+}
+
+async function fetchLatestBaileysVersionWithTimeout(timeoutMs: number): Promise<BaileysVersion> {
+  return await new Promise<BaileysVersion>((resolve, reject) => {
+    let settled = false;
+    const timer = setTimeout(() => {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      const timeoutError = Object.assign(
+        new Error(`Timed out fetching Baileys version after ${timeoutMs}ms`),
+        {
+          status: 408,
+          code: "WA_VERSION_FETCH_TIMEOUT",
+        },
+      );
+      reject(timeoutError);
+    }, timeoutMs);
+
+    void fetchLatestBaileysVersion()
+      .then((result) => {
+        if (settled) {
+          return;
+        }
+        settled = true;
+        clearTimeout(timer);
+        resolve(result.version);
+      })
+      .catch((err) => {
+        if (settled) {
+          return;
+        }
+        settled = true;
+        clearTimeout(timer);
+        reject(err);
+      });
+  });
+}
+
+async function resolveBaileysVersion(logger: ReturnType<typeof getChildLogger>) {
+  const cached = getCachedBaileysVersion();
+  if (cached) {
+    return cached;
+  }
+  try {
+    const version = await fetchLatestBaileysVersionWithTimeout(BAILEYS_VERSION_FETCH_TIMEOUT_MS);
+    cachedBaileysVersion = version;
+    cachedBaileysVersionAt = Date.now();
+    return version;
+  } catch (err) {
+    if (cachedBaileysVersion) {
+      logger.warn(
+        { error: String(err) },
+        "Baileys version fetch failed; using last known cached version",
+      );
+      return cachedBaileysVersion;
+    }
+    logger.warn({ error: String(err) }, "Baileys version fetch failed; using library default");
+    return undefined;
+  }
+}
+
 function enqueueSaveCreds(
   authDir: string,
   saveCreds: () => Promise<void> | void,
@@ -104,13 +186,13 @@ export async function createWaSocket(
   const sessionLogger = getChildLogger({ module: "web-session" });
   maybeRestoreCredsFromBackup(authDir);
   const { state, saveCreds } = await useMultiFileAuthState(authDir);
-  const { version } = await fetchLatestBaileysVersion();
+  const version = await resolveBaileysVersion(sessionLogger);
   const sock = makeWASocket({
     auth: {
       creds: state.creds,
       keys: makeCacheableSignalKeyStore(state.keys, logger),
     },
-    version,
+    ...(version ? { version } : {}),
     logger,
     printQRInTerminal: false,
     browser: ["openclaw", "cli", VERSION],
@@ -160,26 +242,59 @@ export async function createWaSocket(
   return sock;
 }
 
-export async function waitForWaConnection(sock: ReturnType<typeof makeWASocket>) {
+export async function waitForWaConnection(
+  sock: ReturnType<typeof makeWASocket>,
+  opts: { timeoutMs?: number } = {},
+) {
   return new Promise<void>((resolve, reject) => {
     type OffCapable = {
       off?: (event: string, listener: (...args: unknown[]) => void) => void;
+      removeListener?: (event: string, listener: (...args: unknown[]) => void) => void;
     };
     const evWithOff = sock.ev as unknown as OffCapable;
+    const timeoutMs =
+      typeof opts.timeoutMs === "number" && opts.timeoutMs > 0 ? opts.timeoutMs : undefined;
+    let timeoutHandle: NodeJS.Timeout | null = null;
+
+    const detach = () => {
+      if (typeof evWithOff.off === "function") {
+        evWithOff.off("connection.update", handler);
+      } else if (typeof evWithOff.removeListener === "function") {
+        evWithOff.removeListener("connection.update", handler);
+      }
+      if (timeoutHandle) {
+        clearTimeout(timeoutHandle);
+        timeoutHandle = null;
+      }
+    };
 
     const handler = (...args: unknown[]) => {
       const update = (args[0] ?? {}) as Partial<import("@whiskeysockets/baileys").ConnectionState>;
       if (update.connection === "open") {
-        evWithOff.off?.("connection.update", handler);
+        detach();
         resolve();
       }
       if (update.connection === "close") {
-        evWithOff.off?.("connection.update", handler);
+        detach();
         reject(update.lastDisconnect ?? new Error("Connection closed"));
       }
     };
 
     sock.ev.on("connection.update", handler);
+
+    if (timeoutMs) {
+      timeoutHandle = setTimeout(() => {
+        detach();
+        const timeoutError = Object.assign(
+          new Error(`Timed out waiting for WhatsApp connection after ${timeoutMs}ms`),
+          {
+            status: 408,
+            code: "WA_CONNECT_TIMEOUT",
+          },
+        );
+        reject(timeoutError);
+      }, timeoutMs);
+    }
   });
 }
 
