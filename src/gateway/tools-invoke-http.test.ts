@@ -123,6 +123,31 @@ vi.mock("../agents/openclaw-tools.js", () => {
   };
 });
 
+vi.mock("../agents/pi-tools.js", () => ({
+  createOpenClawCodingTools: () => [
+    {
+      name: "exec",
+      parameters: {
+        type: "object",
+        properties: {
+          command: { type: "string" },
+        },
+      },
+      execute: async () => ({ ok: true, source: "coding" }),
+    },
+    {
+      name: "process",
+      parameters: {
+        type: "object",
+        properties: {
+          action: { type: "string" },
+        },
+      },
+      execute: async () => ({ ok: true, source: "coding" }),
+    },
+  ],
+}));
+
 const { handleToolsInvokeHttpRequest } = await import("./tools-invoke-http.js");
 
 let pluginHttpHandlers: Array<(req: IncomingMessage, res: ServerResponse) => Promise<boolean>> = [];
@@ -416,6 +441,44 @@ describe("POST /tools/invoke", () => {
     const body = await res.json();
     expect(body.ok).toBe(false);
     expect(body.error?.type).toBe("tool_error");
+  });
+
+  it("falls back to coding tools for process when core OpenClaw tools do not include it", async () => {
+    cfg = {
+      ...cfg,
+      agents: {
+        list: [{ id: "main", default: true, tools: { allow: ["process"] } }],
+      },
+    };
+
+    const res = await invokeToolAuthed({
+      tool: "process",
+      args: { action: "list" },
+      sessionKey: "main",
+    });
+
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.ok).toBe(true);
+    expect(body.result?.source).toBe("coding");
+  });
+
+  it("applies gateway.tools.deny to coding tool fallback", async () => {
+    cfg = {
+      ...cfg,
+      agents: {
+        list: [{ id: "main", default: true, tools: { allow: ["process"] } }],
+      },
+      gateway: { tools: { deny: ["process"] } },
+    };
+
+    const res = await invokeToolAuthed({
+      tool: "process",
+      args: { action: "list" },
+      sessionKey: "main",
+    });
+
+    expect(res.status).toBe(404);
   });
 
   it("treats gateway.tools.deny as higher priority than gateway.tools.allow", async () => {

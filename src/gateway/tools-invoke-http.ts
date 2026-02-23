@@ -1,5 +1,6 @@
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { createOpenClawTools } from "../agents/openclaw-tools.js";
+import { createOpenClawCodingTools } from "../agents/pi-tools.js";
 import {
   resolveEffectiveToolPolicy,
   resolveGroupToolPolicy,
@@ -295,7 +296,23 @@ export async function handleToolsInvokeHttpRequest(
   const gatewayDenySet = new Set(gatewayDenyNames);
   const gatewayFiltered = subagentFiltered.filter((t) => !gatewayDenySet.has(t.name));
 
-  const tool = gatewayFiltered.find((t) => t.name === toolName);
+  let tool = gatewayFiltered.find((t) => t.name === toolName);
+  // HTTP /tools/invoke uses OpenClaw tools by default; exec/process live in coding tools.
+  // Resolve them lazily only when explicitly requested so existing behavior stays unchanged.
+  if (!tool && (toolName === "exec" || toolName === "process")) {
+    const codingTools = createOpenClawCodingTools({
+      agentId,
+      sessionKey,
+      messageProvider: messageChannel ?? undefined,
+      agentAccountId: accountId,
+      config: cfg,
+    });
+    tool = codingTools.find((candidate) => candidate.name === toolName);
+    if (tool && gatewayDenySet.has(tool.name)) {
+      tool = undefined;
+    }
+  }
+
   if (!tool) {
     sendJson(res, 404, {
       ok: false,
