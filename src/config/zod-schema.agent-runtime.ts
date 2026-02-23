@@ -239,7 +239,15 @@ export const ToolPolicySchema = ToolPolicyBaseSchema.superRefine((value, ctx) =>
 export const ToolsWebSearchSchema = z
   .object({
     enabled: z.boolean().optional(),
-    provider: z.union([z.literal("brave"), z.literal("perplexity"), z.literal("grok")]).optional(),
+    provider: z
+      .union([
+        z.literal("brave"),
+        z.literal("perplexity"),
+        z.literal("grok"),
+        z.literal("gemini"),
+        z.literal("kimi"),
+      ])
+      .optional(),
     apiKey: z.string().optional().register(sensitive),
     maxResults: z.number().int().positive().optional(),
     timeoutSeconds: z.number().int().positive().optional(),
@@ -257,6 +265,21 @@ export const ToolsWebSearchSchema = z
         apiKey: z.string().optional().register(sensitive),
         model: z.string().optional(),
         inlineCitations: z.boolean().optional(),
+      })
+      .strict()
+      .optional(),
+    gemini: z
+      .object({
+        apiKey: z.string().optional().register(sensitive),
+        model: z.string().optional(),
+      })
+      .strict()
+      .optional(),
+    kimi: z
+      .object({
+        apiKey: z.string().optional().register(sensitive),
+        baseUrl: z.string().optional(),
+        model: z.string().optional(),
       })
       .strict()
       .optional(),
@@ -337,6 +360,15 @@ const ToolExecApplyPatchSchema = z
   .strict()
   .optional();
 
+const ToolExecSafeBinProfileSchema = z
+  .object({
+    minPositional: z.number().int().nonnegative().optional(),
+    maxPositional: z.number().int().nonnegative().optional(),
+    allowedValueFlags: z.array(z.string()).optional(),
+    deniedFlags: z.array(z.string()).optional(),
+  })
+  .strict();
+
 const ToolExecBaseShape = {
   host: z.enum(["sandbox", "gateway", "node"]).optional(),
   security: z.enum(["deny", "allowlist", "full"]).optional(),
@@ -344,6 +376,8 @@ const ToolExecBaseShape = {
   node: z.string().optional(),
   pathPrepend: z.array(z.string()).optional(),
   safeBins: z.array(z.string()).optional(),
+  safeBinTrustedDirs: z.array(z.string()).optional(),
+  safeBinProfiles: z.record(z.string(), ToolExecSafeBinProfileSchema).optional(),
   backgroundMs: z.number().int().positive().optional(),
   timeoutSec: z.number().int().positive().optional(),
   maxBackgroundSessionsPerAgent: z.number().int().positive().optional(),
@@ -431,13 +465,17 @@ export const AgentSandboxSchema = z
   .strict()
   .optional();
 
+const CommonToolPolicyFields = {
+  profile: ToolProfileSchema,
+  allow: z.array(z.string()).optional(),
+  alsoAllow: z.array(z.string()).optional(),
+  deny: z.array(z.string()).optional(),
+  byProvider: z.record(z.string(), ToolPolicyWithProfileSchema).optional(),
+};
+
 export const AgentToolsSchema = z
   .object({
-    profile: ToolProfileSchema,
-    allow: z.array(z.string()).optional(),
-    alsoAllow: z.array(z.string()).optional(),
-    deny: z.array(z.string()).optional(),
-    byProvider: z.record(z.string(), ToolPolicyWithProfileSchema).optional(),
+    ...CommonToolPolicyFields,
     elevated: z
       .object({
         enabled: z.boolean().optional(),
@@ -477,7 +515,13 @@ export const MemorySearchSchema = z
       .strict()
       .optional(),
     provider: z
-      .union([z.literal("openai"), z.literal("local"), z.literal("gemini"), z.literal("voyage")])
+      .union([
+        z.literal("openai"),
+        z.literal("local"),
+        z.literal("gemini"),
+        z.literal("voyage"),
+        z.literal("mistral"),
+      ])
       .optional(),
     remote: z
       .object({
@@ -503,6 +547,7 @@ export const MemorySearchSchema = z
         z.literal("gemini"),
         z.literal("local"),
         z.literal("voyage"),
+        z.literal("mistral"),
         z.literal("none"),
       ])
       .optional(),
@@ -632,11 +677,7 @@ export const AgentEntrySchema = z
 
 export const ToolsSchema = z
   .object({
-    profile: ToolProfileSchema,
-    allow: z.array(z.string()).optional(),
-    alsoAllow: z.array(z.string()).optional(),
-    deny: z.array(z.string()).optional(),
-    byProvider: z.record(z.string(), ToolPolicyWithProfileSchema).optional(),
+    ...CommonToolPolicyFields,
     web: ToolsWebSchema,
     media: ToolsMediaSchema,
     links: ToolsLinksSchema,
