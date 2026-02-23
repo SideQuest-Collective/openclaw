@@ -9,7 +9,7 @@ import {
 } from "../infra/shell-env.js";
 import { logInfo } from "../logger.js";
 import { parseAgentSessionKey, resolveAgentIdFromSessionKey } from "../routing/session-key.js";
-import { markBackgrounded } from "./bash-process-registry.js";
+import { listRunningSessions, markBackgrounded } from "./bash-process-registry.js";
 import { processGatewayAllowlist } from "./bash-tools.exec-host-gateway.js";
 import { executeNodeHostCommand } from "./bash-tools.exec-host-node.js";
 import {
@@ -168,6 +168,12 @@ export function createExecTool(
   const notifyOnExit = defaults?.notifyOnExit !== false;
   const notifyOnExitEmptySuccess = defaults?.notifyOnExitEmptySuccess === true;
   const notifySessionKey = defaults?.sessionKey?.trim() || undefined;
+  const maxBackgroundSessionsPerScope =
+    typeof defaults?.maxBackgroundSessionsPerAgent === "number" &&
+    Number.isFinite(defaults.maxBackgroundSessionsPerAgent) &&
+    defaults.maxBackgroundSessionsPerAgent > 0
+      ? Math.floor(defaults.maxBackgroundSessionsPerAgent)
+      : null;
   const approvalRunningNoticeMs = resolveApprovalRunningNoticeMs(defaults?.approvalRunningNoticeMs);
   // Derive agentId only when sessionKey is an agent session key.
   const parsedAgentSession = parseAgentSessionKey(defaults?.sessionKey);
@@ -207,6 +213,27 @@ export function createExecTool(
       let execCommandOverride: string | undefined;
       const backgroundRequested = params.background === true;
       const yieldRequested = typeof params.yieldMs === "number";
+      if (
+        allowBackground &&
+        maxBackgroundSessionsPerScope !== null &&
+        (backgroundRequested || yieldRequested)
+      ) {
+        const activeBackgroundCount = listRunningSessions().filter((session) => {
+          if (defaults?.scopeKey) {
+            return session.scopeKey === defaults.scopeKey;
+          }
+          if (agentId) {
+            return session.scopeKey === `agent:${agentId}`;
+          }
+          return true;
+        }).length;
+        if (activeBackgroundCount >= maxBackgroundSessionsPerScope) {
+          throw new Error(
+            `Background session limit reached (${activeBackgroundCount}/${maxBackgroundSessionsPerScope}) for this scope. ` +
+              "Wait for an existing background process to finish or stop one with process kill.",
+          );
+        }
+      }
       if (!allowBackground && (backgroundRequested || yieldRequested)) {
         warnings.push("Warning: background execution is disabled; running synchronously.");
       }

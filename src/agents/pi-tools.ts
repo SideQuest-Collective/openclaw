@@ -106,6 +106,8 @@ function resolveExecConfig(params: { cfg?: OpenClawConfig; agentId?: string }) {
     safeBins: agentExec?.safeBins ?? globalExec?.safeBins,
     backgroundMs: agentExec?.backgroundMs ?? globalExec?.backgroundMs,
     timeoutSec: agentExec?.timeoutSec ?? globalExec?.timeoutSec,
+    maxBackgroundSessionsPerAgent:
+      agentExec?.maxBackgroundSessionsPerAgent ?? globalExec?.maxBackgroundSessionsPerAgent,
     approvalRunningNoticeMs:
       agentExec?.approvalRunningNoticeMs ?? globalExec?.approvalRunningNoticeMs,
     cleanupMs: agentExec?.cleanupMs ?? globalExec?.cleanupMs,
@@ -365,6 +367,8 @@ export function createOpenClawCodingTools(options?: {
     messageProvider: options?.messageProvider,
     backgroundMs: options?.exec?.backgroundMs ?? execConfig.backgroundMs,
     timeoutSec: options?.exec?.timeoutSec ?? execConfig.timeoutSec,
+    maxBackgroundSessionsPerAgent:
+      options?.exec?.maxBackgroundSessionsPerAgent ?? execConfig.maxBackgroundSessionsPerAgent,
     approvalRunningNoticeMs:
       options?.exec?.approvalRunningNoticeMs ?? execConfig.approvalRunningNoticeMs,
     notifyOnExit: options?.exec?.notifyOnExit ?? execConfig.notifyOnExit,

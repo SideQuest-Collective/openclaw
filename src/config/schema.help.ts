@@ -91,6 +91,8 @@ export const FIELD_HELP: Record<string, string> = {
     "When true (default), backgrounded exec sessions enqueue a system event and request a heartbeat on exit.",
   "tools.exec.notifyOnExitEmptySuccess":
     "When true, successful backgrounded exec exits with empty output still enqueue a completion system event (default: false).",
+  "tools.exec.maxBackgroundSessionsPerAgent":
+    "Maximum active background exec sessions allowed per scope/agent before new background requests are rejected.",
   "tools.exec.pathPrepend": "Directories to prepend to PATH for exec runs (gateway/sandbox).",
   "tools.exec.safeBins":
     "Allow stdin-only safe binaries to run without explicit allowlist entries.",

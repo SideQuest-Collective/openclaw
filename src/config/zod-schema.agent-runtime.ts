@@ -346,6 +346,7 @@ const ToolExecBaseShape = {
   safeBins: z.array(z.string()).optional(),
   backgroundMs: z.number().int().positive().optional(),
   timeoutSec: z.number().int().positive().optional(),
+  maxBackgroundSessionsPerAgent: z.number().int().positive().optional(),
   cleanupMs: z.number().int().positive().optional(),
   notifyOnExit: z.boolean().optional(),
   notifyOnExitEmptySuccess: z.boolean().optional(),

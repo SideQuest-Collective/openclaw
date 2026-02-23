@@ -20,6 +20,7 @@ export type ExecToolDefaults = {
   messageProvider?: string;
   notifyOnExit?: boolean;
   notifyOnExitEmptySuccess?: boolean;
+  maxBackgroundSessionsPerAgent?: number;
   cwd?: string;
 };
 
