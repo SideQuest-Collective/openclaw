@@ -64,6 +64,30 @@ export type AgentRunLoopResult =
     }
   | { kind: "final"; payload: ReplyPayload };
 
+function resolveHeartbeatAwareFallbacksOverride(params: {
+  isHeartbeat: boolean;
+  run: FollowupRun["run"];
+  existingFallbacksOverride?: string[];
+}): string[] | undefined {
+  if (params.existingFallbacksOverride !== undefined) {
+    return params.existingFallbacksOverride;
+  }
+  if (!params.isHeartbeat) {
+    return undefined;
+  }
+  const defaultsModel = params.run.config?.agents?.defaults?.model;
+  if (!defaultsModel || typeof defaultsModel !== "object") {
+    return undefined;
+  }
+  const rawFallbacks = defaultsModel.fallbacks;
+  if (!Array.isArray(rawFallbacks)) {
+    return undefined;
+  }
+  return rawFallbacks
+    .map((entry) => (typeof entry === "string" ? entry.trim() : ""))
+    .filter(Boolean);
+}
+
 export async function runAgentTurnWithFallback(params: {
   commandBody: string;
   followupRun: FollowupRun;
@@ -169,8 +193,14 @@ export async function runAgentTurnWithFallback(params: {
       };
       const blockReplyPipeline = params.blockReplyPipeline;
       const onToolResult = params.opts?.onToolResult;
+      const fallbackOptions = resolveModelFallbackOptions(params.followupRun.run);
       const fallbackResult = await runWithModelFallback({
-        ...resolveModelFallbackOptions(params.followupRun.run),
+        ...fallbackOptions,
+        fallbacksOverride: resolveHeartbeatAwareFallbacksOverride({
+          isHeartbeat: params.isHeartbeat,
+          run: params.followupRun.run,
+          existingFallbacksOverride: fallbackOptions.fallbacksOverride,
+        }),
         run: (provider, model) => {
           // Notify that model selection is complete (including after fallback).
           // This allows responsePrefix template interpolation with the actual model.

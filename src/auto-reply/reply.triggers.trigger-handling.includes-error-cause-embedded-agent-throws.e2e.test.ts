@@ -1,5 +1,6 @@
 import fs from "node:fs/promises";
 import { beforeAll, describe, expect, it } from "vitest";
+import { FailoverError } from "../agents/failover-error.js";
 import {
   getRunEmbeddedPiAgentMock,
   installTriggerHandlingE2eTestHooks,
@@ -91,6 +92,53 @@ describe("trigger handling", () => {
       const call = runEmbeddedPiAgentMock.mock.calls[0]?.[0];
       expect(call?.provider).toBe("anthropic");
       expect(call?.model).toBe("claude-haiku-4-5-20251001");
+    });
+  });
+
+  it("preserves default fallback chain for heartbeat model overrides", async () => {
+    await withTempHome(async (home) => {
+      const runEmbeddedPiAgentMock = getRunEmbeddedPiAgentMock();
+      runEmbeddedPiAgentMock.mockImplementation(async (params: { provider?: string }) => {
+        if (params.provider === "openai-codex") {
+          return {
+            payloads: [{ text: "ok" }],
+            meta: {
+              durationMs: 1,
+              agentMeta: { sessionId: "s", provider: "openai-codex", model: "gpt-5.2" },
+            },
+          };
+        }
+        throw new FailoverError("rate limit", {
+          reason: "rate_limit",
+          provider: typeof params.provider === "string" ? params.provider : undefined,
+        });
+      });
+
+      const cfg = makeCfg(home);
+      cfg.agents = {
+        ...cfg.agents,
+        defaults: {
+          ...cfg.agents?.defaults,
+          model: {
+            primary: "anthropic/claude-opus-4-5",
+            fallbacks: ["openai-codex/gpt-5.2"],
+          },
+          heartbeat: { model: "anthropic/claude-haiku-4-5-20251001" },
+        },
+      };
+
+      const res = await getReplyFromConfig(BASE_MESSAGE, { isHeartbeat: true }, cfg);
+      const text = Array.isArray(res) ? res[0]?.text : res?.text;
+      expect(text).toBe("ok");
+      expect(runEmbeddedPiAgentMock).toHaveBeenCalledTimes(2);
+
+      const first = runEmbeddedPiAgentMock.mock.calls[0]?.[0];
+      expect(first?.provider).toBe("anthropic");
+      expect(first?.model).toBe("claude-haiku-4-5-20251001");
+
+      const second = runEmbeddedPiAgentMock.mock.calls[1]?.[0];
+      expect(second?.provider).toBe("openai-codex");
+      expect(second?.model).toBe("gpt-5.2");
     });
   });
 
