@@ -809,7 +809,6 @@ export async function runEmbeddedAttempt(
           modelApi: params.model.api,
           modelId: params.modelId,
           provider: params.provider,
-          allowedToolNames,
           config: params.config,
           sessionManager,
           sessionId: params.sessionId,

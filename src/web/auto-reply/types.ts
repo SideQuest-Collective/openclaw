@@ -27,6 +27,10 @@ export type WebMonitorTuning = {
   reconnect?: Partial<ReconnectPolicy>;
   heartbeatSeconds?: number;
   connectTimeoutMs?: number;
+  /** Message processing watchdog timeout (ms). */
+  messageTimeoutMs?: number;
+  /** Watchdog polling interval (ms). */
+  watchdogCheckMs?: number;
   sleep?: (ms: number, signal?: AbortSignal) => Promise<void>;
   statusSink?: (status: WebChannelStatus) => void;
   /** WhatsApp account id. Default: "default". */
