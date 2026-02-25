@@ -214,6 +214,27 @@ Think of it like a human reviewing their journal and updating their mental model
 
 The goal: Be helpful without being annoying. Check in a few times a day, do useful background work, but respect quiet time.
 
+## Runtime Process Enforcement
+
+Use the canonical A/B/C runtime-process model for active delivery:
+
+1. Process A (telemetry): report liveness/system health.
+2. Process B (delivery): report task state changes and proof delta.
+3. Process C (verification): provide artifacts for verification-required lanes.
+
+Rules:
+
+- Only Process B may advance task lifecycle.
+- Active and proof_submitted states require `proof_type`, `proof_ref`, and `delta_summary`.
+- Non-compliant delivery check-ins are invalid and must be re-requested with missing fields.
+- Closure claims require stable runtime visibility for three consecutive heartbeats.
+
+Canonical standards (copy into workspace docs as needed):
+
+- `docs/swarm/standards/agent-core-standard.md`
+- `docs/swarm/standards/heartbeat-runtime-process-standard.md`
+- `docs/swarm/standards/lane-ownership-and-wip.md`
+
 ## Make It Yours
 
 This is a starting point. Add your own conventions, style, and rules as you figure out what works.
