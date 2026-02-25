@@ -97,7 +97,9 @@ export async function runMemoryFlushIfNeeded(params: {
     .join("\n\n");
   try {
     await runWithModelFallback({
-      ...resolveModelFallbackOptions(params.followupRun.run),
+      ...resolveModelFallbackOptions(params.followupRun.run, {
+        isHeartbeat: params.isHeartbeat,
+      }),
       run: (provider, model) => {
         const { authProfile, embeddedContext, senderContext } = buildEmbeddedRunContexts({
           run: params.followupRun.run,

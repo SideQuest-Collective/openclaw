@@ -1,4 +1,7 @@
-import { resolveAgentModelFallbacksOverride } from "../../agents/agent-scope.js";
+import {
+  resolveAgentEffectiveModelPrimary,
+  resolveAgentModelFallbacksOverride,
+} from "../../agents/agent-scope.js";
 import type { NormalizedUsage } from "../../agents/usage.js";
 import { getChannelDock } from "../../channels/dock.js";
 import type { ChannelId, ChannelThreadingToolContext } from "../../channels/plugins/types.js";
@@ -145,16 +148,33 @@ export const appendUsageLine = (payloads: ReplyPayload[], line: string): ReplyPa
 export const resolveEnforceFinalTag = (run: FollowupRun["run"], provider: string) =>
   Boolean(run.enforceFinalTag || isReasoningTagProvider(provider));
 
-export function resolveModelFallbackOptions(run: FollowupRun["run"]) {
+export function resolveModelFallbackOptions(
+  run: FollowupRun["run"],
+  options?: { isHeartbeat?: boolean },
+) {
+  const agentId = resolveAgentIdFromSessionKey(run.sessionKey);
+  const agentFallbacksOverride = resolveAgentModelFallbacksOverride(run.config, agentId);
+  const isHeartbeat = options?.isHeartbeat === true;
+
+  let fallbacksOverride = agentFallbacksOverride;
+  if (isHeartbeat) {
+    const heartbeatFallbacks = [
+      resolveAgentEffectiveModelPrimary(run.config, agentId),
+      ...(Array.isArray(agentFallbacksOverride) ? agentFallbacksOverride : []),
+    ]
+      .map((entry) => (typeof entry === "string" ? entry.trim() : ""))
+      .filter(Boolean);
+    if (heartbeatFallbacks.length > 0) {
+      fallbacksOverride = [...new Set(heartbeatFallbacks)];
+    }
+  }
+
   return {
     cfg: run.config,
     provider: run.provider,
     model: run.model,
     agentDir: run.agentDir,
-    fallbacksOverride: resolveAgentModelFallbacksOverride(
-      run.config,
-      resolveAgentIdFromSessionKey(run.sessionKey),
-    ),
+    fallbacksOverride,
   };
 }
 

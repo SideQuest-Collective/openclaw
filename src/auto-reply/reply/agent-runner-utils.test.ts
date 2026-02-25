@@ -3,11 +3,18 @@ import type { FollowupRun } from "./queue.js";
 
 const hoisted = vi.hoisted(() => {
   const resolveAgentModelFallbacksOverrideMock = vi.fn();
+  const resolveAgentEffectiveModelPrimaryMock = vi.fn();
   const resolveAgentIdFromSessionKeyMock = vi.fn();
-  return { resolveAgentModelFallbacksOverrideMock, resolveAgentIdFromSessionKeyMock };
+  return {
+    resolveAgentModelFallbacksOverrideMock,
+    resolveAgentEffectiveModelPrimaryMock,
+    resolveAgentIdFromSessionKeyMock,
+  };
 });
 
 vi.mock("../../agents/agent-scope.js", () => ({
+  resolveAgentEffectiveModelPrimary: (...args: unknown[]) =>
+    hoisted.resolveAgentEffectiveModelPrimaryMock(...args),
   resolveAgentModelFallbacksOverride: (...args: unknown[]) =>
     hoisted.resolveAgentModelFallbacksOverrideMock(...args),
 }));
@@ -51,6 +58,7 @@ function makeRun(overrides: Partial<FollowupRun["run"]> = {}): FollowupRun["run"
 describe("agent-runner-utils", () => {
   beforeEach(() => {
     hoisted.resolveAgentModelFallbacksOverrideMock.mockClear();
+    hoisted.resolveAgentEffectiveModelPrimaryMock.mockClear();
     hoisted.resolveAgentIdFromSessionKeyMock.mockClear();
   });
 
@@ -73,6 +81,30 @@ describe("agent-runner-utils", () => {
       agentDir: run.agentDir,
       fallbacksOverride: ["fallback-model"],
     });
+  });
+
+  it("prepends configured primary fallback during heartbeat runs", () => {
+    hoisted.resolveAgentIdFromSessionKeyMock.mockReturnValue("agent-id");
+    hoisted.resolveAgentModelFallbacksOverrideMock.mockReturnValue([
+      "anthropic/claude-opus-4-6",
+      "openai-codex/gpt-5.3-codex",
+    ]);
+    hoisted.resolveAgentEffectiveModelPrimaryMock.mockReturnValue("openai-codex/gpt-5.3-codex");
+
+    const run = makeRun({
+      provider: "anthropic",
+      model: "claude-sonnet-4-5-20250929",
+    });
+    const resolved = resolveModelFallbackOptions(run, { isHeartbeat: true });
+
+    expect(hoisted.resolveAgentEffectiveModelPrimaryMock).toHaveBeenCalledWith(
+      run.config,
+      "agent-id",
+    );
+    expect(resolved.fallbacksOverride).toEqual([
+      "openai-codex/gpt-5.3-codex",
+      "anthropic/claude-opus-4-6",
+    ]);
   });
 
   it("builds embedded run base params with auth profile and run metadata", () => {
