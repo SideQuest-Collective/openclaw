@@ -2,21 +2,21 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { FollowupRun } from "./queue.js";
 
 const hoisted = vi.hoisted(() => {
-  const resolveAgentModelFallbacksOverrideMock = vi.fn();
   const resolveAgentEffectiveModelPrimaryMock = vi.fn();
   const resolveAgentIdFromSessionKeyMock = vi.fn();
+  const resolveRunModelFallbacksOverrideMock = vi.fn();
   return {
-    resolveAgentModelFallbacksOverrideMock,
     resolveAgentEffectiveModelPrimaryMock,
     resolveAgentIdFromSessionKeyMock,
+    resolveRunModelFallbacksOverrideMock,
   };
 });
 
 vi.mock("../../agents/agent-scope.js", () => ({
   resolveAgentEffectiveModelPrimary: (...args: unknown[]) =>
     hoisted.resolveAgentEffectiveModelPrimaryMock(...args),
-  resolveAgentModelFallbacksOverride: (...args: unknown[]) =>
-    hoisted.resolveAgentModelFallbacksOverrideMock(...args),
+  resolveRunModelFallbacksOverride: (...args: unknown[]) =>
+    hoisted.resolveRunModelFallbacksOverrideMock(...args),
 }));
 
 vi.mock("../../config/sessions.js", () => ({
@@ -57,23 +57,22 @@ function makeRun(overrides: Partial<FollowupRun["run"]> = {}): FollowupRun["run"
 
 describe("agent-runner-utils", () => {
   beforeEach(() => {
-    hoisted.resolveAgentModelFallbacksOverrideMock.mockClear();
     hoisted.resolveAgentEffectiveModelPrimaryMock.mockClear();
     hoisted.resolveAgentIdFromSessionKeyMock.mockClear();
+    hoisted.resolveRunModelFallbacksOverrideMock.mockClear();
   });
 
   it("resolves model fallback options from run context", () => {
-    hoisted.resolveAgentIdFromSessionKeyMock.mockReturnValue("agent-id");
-    hoisted.resolveAgentModelFallbacksOverrideMock.mockReturnValue(["fallback-model"]);
+    hoisted.resolveRunModelFallbacksOverrideMock.mockReturnValue(["fallback-model"]);
     const run = makeRun();
 
     const resolved = resolveModelFallbackOptions(run);
 
-    expect(hoisted.resolveAgentIdFromSessionKeyMock).toHaveBeenCalledWith(run.sessionKey);
-    expect(hoisted.resolveAgentModelFallbacksOverrideMock).toHaveBeenCalledWith(
-      run.config,
-      "agent-id",
-    );
+    expect(hoisted.resolveRunModelFallbacksOverrideMock).toHaveBeenCalledWith({
+      cfg: run.config,
+      agentId: run.agentId,
+      sessionKey: run.sessionKey,
+    });
     expect(resolved).toEqual({
       cfg: run.config,
       provider: run.provider,
@@ -83,23 +82,37 @@ describe("agent-runner-utils", () => {
     });
   });
 
+  it("passes through missing agentId for helper-based fallback resolution", () => {
+    hoisted.resolveRunModelFallbacksOverrideMock.mockReturnValue(["fallback-model"]);
+    hoisted.resolveAgentIdFromSessionKeyMock.mockReturnValue("derived-agent");
+    const run = makeRun({ agentId: undefined });
+
+    const resolved = resolveModelFallbackOptions(run);
+
+    expect(hoisted.resolveRunModelFallbacksOverrideMock).toHaveBeenCalledWith({
+      cfg: run.config,
+      agentId: "derived-agent",
+      sessionKey: run.sessionKey,
+    });
+    expect(resolved.fallbacksOverride).toEqual(["fallback-model"]);
+  });
+
   it("prepends configured primary fallback during heartbeat runs", () => {
-    hoisted.resolveAgentIdFromSessionKeyMock.mockReturnValue("agent-id");
-    hoisted.resolveAgentModelFallbacksOverrideMock.mockReturnValue([
+    hoisted.resolveRunModelFallbacksOverrideMock.mockReturnValue([
       "anthropic/claude-opus-4-6",
       "openai-codex/gpt-5.3-codex",
     ]);
     hoisted.resolveAgentEffectiveModelPrimaryMock.mockReturnValue("openai-codex/gpt-5.3-codex");
-
     const run = makeRun({
       provider: "anthropic",
       model: "claude-sonnet-4-5-20250929",
     });
+
     const resolved = resolveModelFallbackOptions(run, { isHeartbeat: true });
 
     expect(hoisted.resolveAgentEffectiveModelPrimaryMock).toHaveBeenCalledWith(
       run.config,
-      "agent-id",
+      run.agentId,
     );
     expect(resolved.fallbacksOverride).toEqual([
       "openai-codex/gpt-5.3-codex",
@@ -180,5 +193,23 @@ describe("agent-runner-utils", () => {
       senderUsername: undefined,
       senderE164: undefined,
     });
+  });
+
+  it("prefers OriginatingChannel over Provider for messageProvider", () => {
+    const run = makeRun();
+
+    const resolved = buildEmbeddedRunContexts({
+      run,
+      sessionCtx: {
+        Provider: "heartbeat",
+        OriginatingChannel: "Telegram",
+        OriginatingTo: "268300329",
+      },
+      hasRepliedRef: undefined,
+      provider: "openai",
+    });
+
+    expect(resolved.embeddedContext.messageProvider).toBe("telegram");
+    expect(resolved.embeddedContext.messageTo).toBe("268300329");
   });
 });

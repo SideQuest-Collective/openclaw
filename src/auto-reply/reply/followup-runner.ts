@@ -13,6 +13,11 @@ import type { OriginatingChannelType } from "../templating.js";
 import { isSilentReplyText, SILENT_REPLY_TOKEN } from "../tokens.js";
 import type { GetReplyOptions, ReplyPayload } from "../types.js";
 import { resolveModelFallbackOptions, resolveRunAuthProfile } from "./agent-runner-utils.js";
+import {
+  resolveOriginAccountId,
+  resolveOriginMessageProvider,
+  resolveOriginMessageTo,
+} from "./origin-routing.js";
 import type { FollowupRun } from "./queue.js";
 import {
   applyReplyThreading,
@@ -97,11 +102,21 @@ export function createFollowupRunner(params: {
           cfg: queued.run.config,
         });
         if (!result.ok) {
-          // Log error and fall back to dispatcher if available.
           const errorMsg = result.error ?? "unknown error";
           logVerbose(`followup queue: route-reply failed: ${errorMsg}`);
-          // Fallback: try the dispatcher if routing failed.
-          if (opts?.onBlockReply) {
+          // Fall back to the caller-provided dispatcher only when the
+          // originating channel matches the session's message provider.
+          // In that case onBlockReply was created by the same channel's
+          // handler and delivers to the correct destination.  For true
+          // cross-channel routing (origin !== provider), falling back
+          // would send to the wrong channel, so we drop the payload.
+          const provider = resolveOriginMessageProvider({
+            provider: queued.run.messageProvider,
+          });
+          const origin = resolveOriginMessageProvider({
+            originatingChannel,
+          });
+          if (opts?.onBlockReply && origin && origin === provider) {
             await opts.onBlockReply(payload);
           }
         }
@@ -228,9 +243,10 @@ export function createFollowupRunner(params: {
         }
         return [{ ...payload, text: stripped.text }];
       });
-      const replyToChannel =
-        queued.originatingChannel ??
-        (queued.run.messageProvider?.toLowerCase() as OriginatingChannelType | undefined);
+      const replyToChannel = resolveOriginMessageProvider({
+        originatingChannel: queued.originatingChannel,
+        provider: queued.run.messageProvider,
+      }) as OriginatingChannelType | undefined;
       const replyToMode = resolveReplyToMode(
         queued.run.config,
         replyToChannel,
@@ -253,10 +269,18 @@ export function createFollowupRunner(params: {
         sentMediaUrls: runResult.messagingToolSentMediaUrls ?? [],
       });
       const suppressMessagingToolReplies = shouldSuppressMessagingToolReplies({
-        messageProvider: queued.run.messageProvider,
+        messageProvider: resolveOriginMessageProvider({
+          originatingChannel: queued.originatingChannel,
+          provider: queued.run.messageProvider,
+        }),
         messagingToolSentTargets: runResult.messagingToolSentTargets,
-        originatingTo: queued.originatingTo,
-        accountId: queued.run.agentAccountId,
+        originatingTo: resolveOriginMessageTo({
+          originatingTo: queued.originatingTo,
+        }),
+        accountId: resolveOriginAccountId({
+          originatingAccountId: queued.originatingAccountId,
+          accountId: queued.run.agentAccountId,
+        }),
       });
       const finalPayloads = suppressMessagingToolReplies ? [] : mediaFilteredPayloads;
 
@@ -283,7 +307,15 @@ export function createFollowupRunner(params: {
 
       await sendFollowupPayloads(finalPayloads, queued);
     } finally {
+      // Both signals are required for the typing controller to clean up.
+      // The main inbound dispatch path calls markDispatchIdle() from the
+      // buffered dispatcher's finally block, but followup turns bypass the
+      // dispatcher entirely — so we must fire both signals here.  Without
+      // this, NO_REPLY / empty-payload followups leave the typing indicator
+      // stuck (the keepalive loop keeps sending "typing" to Telegram
+      // indefinitely until the TTL expires).
       typing.markRunComplete();
+      typing.markDispatchIdle();
     }
   };
 }

@@ -1,6 +1,6 @@
 import {
   resolveAgentEffectiveModelPrimary,
-  resolveAgentModelFallbacksOverride,
+  resolveRunModelFallbacksOverride,
 } from "../../agents/agent-scope.js";
 import type { NormalizedUsage } from "../../agents/usage.js";
 import { getChannelDock } from "../../channels/dock.js";
@@ -12,6 +12,7 @@ import { isReasoningTagProvider } from "../../utils/provider-utils.js";
 import { estimateUsageCost, formatTokenCount, formatUsd } from "../../utils/usage-format.js";
 import type { TemplateContext } from "../templating.js";
 import type { ReplyPayload } from "../types.js";
+import { resolveOriginMessageProvider, resolveOriginMessageTo } from "./origin-routing.js";
 import type { FollowupRun } from "./queue.js";
 
 const BUN_FETCH_SOCKET_ERROR_RE = /socket connection was closed unexpectedly/i;
@@ -152,20 +153,24 @@ export function resolveModelFallbackOptions(
   run: FollowupRun["run"],
   options?: { isHeartbeat?: boolean },
 ) {
-  const agentId = resolveAgentIdFromSessionKey(run.sessionKey);
-  const agentFallbacksOverride = resolveAgentModelFallbacksOverride(run.config, agentId);
+  const agentId = run.agentId ?? resolveAgentIdFromSessionKey(run.sessionKey);
+  const fallbackOverrides = resolveRunModelFallbacksOverride({
+    cfg: run.config,
+    agentId,
+    sessionKey: run.sessionKey,
+  });
   const isHeartbeat = options?.isHeartbeat === true;
 
-  let fallbacksOverride = agentFallbacksOverride;
+  let resolvedFallbacks = fallbackOverrides;
   if (isHeartbeat) {
     const heartbeatFallbacks = [
       resolveAgentEffectiveModelPrimary(run.config, agentId),
-      ...(Array.isArray(agentFallbacksOverride) ? agentFallbacksOverride : []),
+      ...(Array.isArray(fallbackOverrides) ? fallbackOverrides : []),
     ]
       .map((entry) => (typeof entry === "string" ? entry.trim() : ""))
       .filter(Boolean);
     if (heartbeatFallbacks.length > 0) {
-      fallbacksOverride = [...new Set(heartbeatFallbacks)];
+      resolvedFallbacks = [...new Set(heartbeatFallbacks)];
     }
   }
 
@@ -174,7 +179,7 @@ export function resolveModelFallbackOptions(
     provider: run.provider,
     model: run.model,
     agentDir: run.agentDir,
-    fallbacksOverride,
+    fallbacksOverride: resolvedFallbacks,
   };
 }
 
@@ -216,9 +221,15 @@ export function buildEmbeddedContextFromTemplate(params: {
     sessionId: params.run.sessionId,
     sessionKey: params.run.sessionKey,
     agentId: params.run.agentId,
-    messageProvider: params.sessionCtx.Provider?.trim().toLowerCase() || undefined,
+    messageProvider: resolveOriginMessageProvider({
+      originatingChannel: params.sessionCtx.OriginatingChannel,
+      provider: params.sessionCtx.Provider,
+    }),
     agentAccountId: params.sessionCtx.AccountId,
-    messageTo: params.sessionCtx.OriginatingTo ?? params.sessionCtx.To,
+    messageTo: resolveOriginMessageTo({
+      originatingTo: params.sessionCtx.OriginatingTo,
+      to: params.sessionCtx.To,
+    }),
     messageThreadId: params.sessionCtx.MessageThreadId ?? undefined,
     // Provider threading context for tool auto-injection
     ...buildThreadingToolContext({
