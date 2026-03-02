@@ -50,6 +50,8 @@ export async function resolveBootstrapFilesForRun(params: {
   warn?: (message: string) => void;
 }): Promise<WorkspaceBootstrapFile[]> {
   const sessionKey = params.sessionKey ?? params.sessionId;
+  // System prompt bootstrap files must always come from workspaceDir. Agent directory
+  // content (OPENCLAW_AGENT_DIR) is not a bootstrap source for AGENTS/HEARTBEAT.
   const rawFiles = params.sessionKey
     ? await getOrLoadBootstrapFiles({
         workspaceDir: params.workspaceDir,

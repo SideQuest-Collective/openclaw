@@ -498,6 +498,8 @@ async function resolveMemoryBootstrapEntries(
 export async function loadWorkspaceBootstrapFiles(dir: string): Promise<WorkspaceBootstrapFile[]> {
   const resolvedDir = resolveUserPath(dir);
 
+  // Bootstrap context is intentionally workspace-scoped. Do not read AGENTS.md/HEARTBEAT.md
+  // from agentDir (~/.openclaw/agents/<id>/agent); that directory is runtime state/auth.
   const entries: Array<{
     name: WorkspaceBootstrapFileName;
     filePath: string;

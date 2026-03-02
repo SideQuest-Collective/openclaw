@@ -227,6 +227,29 @@ If you need Playwright to install system deps, rebuild the image with
 - Ensure `/home/node` persists via `OPENCLAW_HOME_VOLUME`, or mount
   `/home/node/.cache/ms-playwright` via `OPENCLAW_EXTRA_MOUNTS`.
 
+### Agent-scoped WebKit/iPhone audit mode (build-time only)
+
+For local iPhone/WebKit emulation lanes, enable WebKit only on selected agents
+through compose build args generated from `agents.yml` (`browser.webkitAudit: true`).
+
+Security model:
+
+- build-time only install path (no runtime `apt`, no runtime `--with-deps`)
+- opt-in per agent service only
+- non-root runtime remains unchanged
+- fixed dependency profile `bookworm-pinned-v1`
+
+Build args applied to flagged agents:
+
+```yaml
+OPENCLAW_INSTALL_PLAYWRIGHT_WEBKIT: "1"
+OPENCLAW_PLAYWRIGHT_WEBKIT_DEPS_PROFILE: "bookworm-pinned-v1"
+```
+
+Dependency profile reference:
+
+- `docs/security/playwright-webkit-deps-bookworm-v1.md`
+
 ### Permissions + EACCES
 
 The image runs as `node` (uid 1000). If you see permission errors on
