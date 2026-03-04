@@ -4,9 +4,9 @@
 
 ## Documents
 
-- [Threat Model](./THREAT-MODEL-ATLAS.md) - MITRE ATLAS-based threat model for the OpenClaw ecosystem
-- [Contributing to the Threat Model](./CONTRIBUTING-THREAT-MODEL.md) - How to add threats, mitigations, and attack chains
-- [Playwright WebKit Deps Profile (Bookworm v1)](./playwright-webkit-deps-bookworm-v1.md) - Pinned WebKit host dependency allowlist for scoped Docker audit lanes
+- [Threat Model](/security/THREAT-MODEL-ATLAS) - MITRE ATLAS-based threat model for the OpenClaw ecosystem
+- [Contributing to the Threat Model](/security/CONTRIBUTING-THREAT-MODEL) - How to add threats, mitigations, and attack chains
+- [Playwright WebKit Deps Profile (Bookworm v1)](/security/playwright-webkit-deps-bookworm-v1) - Pinned WebKit host dependency allowlist for scoped Docker audit lanes
 
 ## Reporting Vulnerabilities
 
