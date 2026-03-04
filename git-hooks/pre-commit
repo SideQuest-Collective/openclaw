@@ -46,4 +46,7 @@ if [ "${#format_files[@]}" -gt 0 ]; then
   "$RUN_NODE_TOOL" oxfmt --write -- "${format_files[@]}"
 fi
 
-git add -- "${files[@]}"
+# Re-stage only paths already tracked in the index (including newly-added files
+# already staged earlier in this commit). This avoids failures for paths under
+# ignored directories (for example skills/*/bin) while still capturing fixer edits.
+git add --update -- "${files[@]}"

@@ -65,4 +65,53 @@ describe("git-hooks/pre-commit (integration)", () => {
     const staged = run(dir, "git", ["diff", "--cached", "--name-only"]).split("\n").filter(Boolean);
     expect(staged).toEqual(["--all"]);
   });
+
+  it("re-stages already-staged files under ignored directories", () => {
+    const dir = mkdtempSync(path.join(os.tmpdir(), "openclaw-pre-commit-"));
+    run(dir, "git", ["init", "-q", "--initial-branch=main"]);
+
+    mkdirSync(path.join(dir, "git-hooks"), { recursive: true });
+    mkdirSync(path.join(dir, "scripts", "pre-commit"), { recursive: true });
+    symlinkSync(
+      path.join(process.cwd(), "git-hooks", "pre-commit"),
+      path.join(dir, "git-hooks", "pre-commit"),
+    );
+    writeFileSync(
+      path.join(dir, "scripts", "pre-commit", "run-node-tool.sh"),
+      "#!/usr/bin/env bash\nexit 0\n",
+      {
+        encoding: "utf8",
+        mode: 0o755,
+      },
+    );
+    writeFileSync(
+      path.join(dir, "scripts", "pre-commit", "filter-staged-files.mjs"),
+      "process.exit(0);\n",
+      "utf8",
+    );
+    const fakeBinDir = path.join(dir, "bin");
+    mkdirSync(fakeBinDir, { recursive: true });
+    writeFileSync(path.join(fakeBinDir, "node"), "#!/usr/bin/env bash\nexit 0\n", {
+      encoding: "utf8",
+      mode: 0o755,
+    });
+
+    writeFileSync(path.join(dir, ".gitignore"), "bin/\n", "utf8");
+    mkdirSync(path.join(dir, "skills", "sherpa-onnx-tts", "bin"), { recursive: true });
+    writeFileSync(
+      path.join(dir, "skills", "sherpa-onnx-tts", "bin", "sherpa-onnx-tts"),
+      "#!/usr/bin/env node\nconsole.log('ok');\n",
+      { encoding: "utf8", mode: 0o755 },
+    );
+
+    run(dir, "git", ["add", ".gitignore"]);
+    run(dir, "git", ["add", "-f", "skills/sherpa-onnx-tts/bin/sherpa-onnx-tts"]);
+
+    run(dir, "bash", ["git-hooks/pre-commit"], {
+      PATH: `${fakeBinDir}:${process.env.PATH ?? ""}`,
+    });
+
+    const staged = run(dir, "git", ["diff", "--cached", "--name-only"]).split("\n").filter(Boolean);
+    expect(staged).toEqual([".gitignore", "skills/sherpa-onnx-tts/bin/sherpa-onnx-tts"]);
+  });
 });
