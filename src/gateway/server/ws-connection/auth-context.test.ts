@@ -1,6 +1,10 @@
 import { describe, expect, it, vi } from "vitest";
 import type { AuthRateLimiter } from "../../auth-rate-limit.js";
-import { resolveConnectAuthDecision, type ConnectAuthState } from "./auth-context.js";
+import {
+  resolveConnectAuthDecision,
+  resolveConnectAuthState,
+  type ConnectAuthState,
+} from "./auth-context.js";
 
 type VerifyDeviceTokenFn = Parameters<typeof resolveConnectAuthDecision>[0]["verifyDeviceToken"];
 
@@ -130,5 +134,34 @@ describe("resolveConnectAuthDecision", () => {
     expect(decision.authOk).toBe(true);
     expect(decision.authMethod).toBe("token");
     expect(verifyDeviceToken).not.toHaveBeenCalled();
+  });
+});
+
+describe("resolveConnectAuthState", () => {
+  it("treats bearer header auth as shared auth for control-ui policy decisions", async () => {
+    const state = await resolveConnectAuthState({
+      resolvedAuth: {
+        mode: "token",
+        token: "secret-token",
+        allowTailscale: false,
+      },
+      connectAuth: undefined,
+      hasDeviceIdentity: false,
+      req: {
+        headers: {
+          authorization: "Bearer secret-token",
+        },
+        socket: {
+          remoteAddress: "198.51.100.8",
+        },
+      } as unknown as Parameters<typeof resolveConnectAuthState>[0]["req"],
+      trustedProxies: [],
+      allowRealIpFallback: false,
+    });
+
+    expect(state.authOk).toBe(true);
+    expect(state.authMethod).toBe("token");
+    expect(state.sharedAuthOk).toBe(true);
+    expect(state.sharedAuthProvided).toBe(false);
   });
 });
