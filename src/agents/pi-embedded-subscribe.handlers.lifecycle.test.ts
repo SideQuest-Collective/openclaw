@@ -73,4 +73,41 @@ describe("handleAgentEnd", () => {
     expect(ctx.log.warn).not.toHaveBeenCalled();
     expect(ctx.log.debug).toHaveBeenCalledWith("embedded run agent end: runId=run-1 isError=false");
   });
+
+  it("emits structured oauth auth diagnostics for codex lifecycle errors", () => {
+    const onAgentEvent = vi.fn();
+    const ctx = createContext(
+      {
+        role: "assistant",
+        provider: "openai-codex",
+        model: "gpt-5.3-codex",
+        stopReason: "error",
+        errorMessage:
+          "HTTP 401 authentication_error: OAuth authentication is currently not supported. (request_id: req_123)",
+        content: [{ type: "text", text: "" }],
+      },
+      { onAgentEvent },
+    );
+
+    handleAgentEnd(ctx);
+
+    expect(onAgentEvent).toHaveBeenCalledWith({
+      stream: "lifecycle",
+      data: {
+        phase: "error",
+        error:
+          "HTTP 401: authentication_error: OAuth authentication is currently not supported. (request_id: req_123)",
+        provider: "openai-codex",
+        model: "gpt-5.3-codex",
+        requestId: "req_123",
+        errorCode: "oauth_auth_not_supported",
+        authDiagnostic: {
+          kind: "oauth_auth_not_supported",
+          provider: "openai-codex",
+          model: "gpt-5.3-codex",
+          requestId: "req_123",
+        },
+      },
+    });
+  });
 });

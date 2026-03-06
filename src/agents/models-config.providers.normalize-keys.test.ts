@@ -73,4 +73,31 @@ describe("normalizeProviders", () => {
       await fs.rm(agentDir, { recursive: true, force: true });
     }
   });
+
+  it("injects the codex transport for openai-codex providers when api is omitted", async () => {
+    const agentDir = await fs.mkdtemp(path.join(os.tmpdir(), "openclaw-agent-"));
+    try {
+      const providers: NonNullable<NonNullable<OpenClawConfig["models"]>["providers"]> = {
+        "openai-codex": {
+          baseUrl: "https://chatgpt.com/backend-api",
+          models: [
+            {
+              id: "gpt-5.3-codex",
+              name: "GPT-5.3 Codex",
+              input: ["text"],
+              reasoning: false,
+              cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+              contextWindow: 400000,
+              maxTokens: 128000,
+            },
+          ],
+        },
+      };
+
+      const normalized = normalizeProviders({ providers, agentDir });
+      expect(normalized?.["openai-codex"]?.api).toBe("openai-codex-responses");
+    } finally {
+      await fs.rm(agentDir, { recursive: true, force: true });
+    }
+  });
 });

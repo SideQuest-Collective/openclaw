@@ -9,6 +9,35 @@ export {
   handleAutoCompactionStart,
 } from "./pi-embedded-subscribe.handlers.compaction.js";
 
+function buildStructuredLifecycleError(params: {
+  errorText: string;
+  provider?: string;
+  model?: string;
+}) {
+  const trimmed = params.errorText.trim();
+  const requestIdMatch = trimmed.match(/\(request_id:\s*([^)]+)\)/i);
+  const isOAuthAuthUnsupported = /OAuth authentication is currently not supported/i.test(trimmed);
+
+  return {
+    phase: "error",
+    error: trimmed,
+    ...(params.provider ? { provider: params.provider } : {}),
+    ...(params.model ? { model: params.model } : {}),
+    ...(requestIdMatch?.[1] ? { requestId: requestIdMatch[1].trim() } : {}),
+    ...(isOAuthAuthUnsupported
+      ? {
+          errorCode: "oauth_auth_not_supported",
+          authDiagnostic: {
+            kind: "oauth_auth_not_supported",
+            provider: params.provider ?? null,
+            model: params.model ?? null,
+            ...(requestIdMatch?.[1] ? { requestId: requestIdMatch[1].trim() } : {}),
+          },
+        }
+      : {}),
+  };
+}
+
 export function handleAgentStart(ctx: EmbeddedPiSubscribeContext) {
   ctx.log.debug(`embedded run agent start: runId=${ctx.params.runId}`);
   emitAgentEvent({
@@ -37,6 +66,11 @@ export function handleAgentEnd(ctx: EmbeddedPiSubscribeContext) {
       model: lastAssistant.model,
     });
     const errorText = (friendlyError || lastAssistant.errorMessage || "LLM request failed.").trim();
+    const lifecycleErrorData = buildStructuredLifecycleError({
+      errorText,
+      provider: lastAssistant.provider,
+      model: lastAssistant.model,
+    });
     ctx.log.warn(
       `embedded run agent end: runId=${ctx.params.runId} isError=true error=${errorText}`,
     );
@@ -44,17 +78,13 @@ export function handleAgentEnd(ctx: EmbeddedPiSubscribeContext) {
       runId: ctx.params.runId,
       stream: "lifecycle",
       data: {
-        phase: "error",
-        error: errorText,
+        ...lifecycleErrorData,
         endedAt: Date.now(),
       },
     });
     void ctx.params.onAgentEvent?.({
       stream: "lifecycle",
-      data: {
-        phase: "error",
-        error: errorText,
-      },
+      data: lifecycleErrorData,
     });
   } else {
     ctx.log.debug(`embedded run agent end: runId=${ctx.params.runId} isError=${isError}`);

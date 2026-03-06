@@ -90,6 +90,39 @@ describe("models-config", () => {
     });
   });
 
+  it("writes openai-codex providers with the codex responses api", async () => {
+    await withTempHome(async () => {
+      await ensureOpenClawModelsJson({
+        models: {
+          providers: {
+            "openai-codex": {
+              baseUrl: "https://chatgpt.com/backend-api",
+              models: [
+                {
+                  id: "gpt-5.3-codex",
+                  name: "GPT-5.3 Codex",
+                  input: ["text"],
+                  reasoning: false,
+                  cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+                  contextWindow: 400000,
+                  maxTokens: 128000,
+                },
+              ],
+            },
+          },
+        },
+      });
+
+      const modelPath = path.join(resolveOpenClawAgentDir(), "models.json");
+      const raw = await fs.readFile(modelPath, "utf8");
+      const parsed = JSON.parse(raw) as {
+        providers: Record<string, { api?: string }>;
+      };
+
+      expect(parsed.providers["openai-codex"]?.api).toBe("openai-codex-responses");
+    });
+  });
+
   it("adds minimax provider when MINIMAX_API_KEY is set", async () => {
     await withTempHome(async () => {
       await runEnvProviderCase({

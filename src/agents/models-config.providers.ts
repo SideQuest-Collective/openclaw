@@ -480,6 +480,16 @@ function normalizeAntigravityProvider(provider: ProviderConfig): ProviderConfig 
   return normalizeProviderModels(provider, normalizeAntigravityModelId);
 }
 
+function normalizeOpenAICodexProvider(provider: ProviderConfig): ProviderConfig {
+  if (provider.api === "openai-codex-responses") {
+    return provider;
+  }
+  return {
+    ...provider,
+    api: "openai-codex-responses",
+  };
+}
+
 export function normalizeProviders(params: {
   providers: ModelsConfig["providers"];
   agentDir: string;
@@ -559,6 +569,14 @@ export function normalizeProviders(params: {
         mutated = true;
       }
       normalizedProvider = antigravityNormalized;
+    }
+
+    if (normalizedKey === "openai-codex") {
+      const codexNormalized = normalizeOpenAICodexProvider(normalizedProvider);
+      if (codexNormalized !== normalizedProvider) {
+        mutated = true;
+      }
+      normalizedProvider = codexNormalized;
     }
 
     const existing = next[normalizedKey];
