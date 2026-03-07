@@ -43,6 +43,44 @@ export function resolveExtraParams(params: {
   return Object.assign({}, globalParams, agentParams);
 }
 
+function resolveConfiguredAnthropicHeaderBetas(params: {
+  cfg: OpenClawConfig | undefined;
+  provider: string;
+  modelId: string;
+}): string[] | undefined {
+  if (params.provider !== "anthropic") {
+    return undefined;
+  }
+
+  const providerConfig = params.cfg?.models?.providers?.[params.provider];
+  if (!providerConfig || typeof providerConfig !== "object") {
+    return undefined;
+  }
+
+  const betas = new Set<string>();
+  const providerHeaders =
+    "headers" in providerConfig &&
+    providerConfig.headers &&
+    typeof providerConfig.headers === "object"
+      ? (providerConfig.headers as Record<string, unknown>)
+      : undefined;
+  for (const beta of parseHeaderList(providerHeaders?.["anthropic-beta"])) {
+    betas.add(beta);
+  }
+
+  const configuredModels =
+    "models" in providerConfig && Array.isArray(providerConfig.models) ? providerConfig.models : [];
+  const modelConfig = configuredModels.find(
+    (entry) =>
+      entry && typeof entry === "object" && (entry as { id?: unknown }).id === params.modelId,
+  ) as { headers?: Record<string, unknown> } | undefined;
+  for (const beta of parseHeaderList(modelConfig?.headers?.["anthropic-beta"])) {
+    betas.add(beta);
+  }
+
+  return betas.size > 0 ? [...betas] : undefined;
+}
+
 type CacheRetention = "none" | "short" | "long";
 type CacheRetentionStreamOptions = Partial<SimpleStreamOptions> & {
   cacheRetention?: CacheRetention;
@@ -894,7 +932,10 @@ export function applyExtraParamsToAgent(
     agent.streamFn = wrappedStreamFn;
   }
 
-  const anthropicBetas = resolveAnthropicBetas(merged, provider, modelId);
+  const anthropicBetas = [
+    ...(resolveConfiguredAnthropicHeaderBetas({ cfg, provider, modelId }) ?? []),
+    ...(resolveAnthropicBetas(merged, provider, modelId) ?? []),
+  ];
   if (anthropicBetas?.length) {
     log.debug(
       `applying Anthropic beta header for ${provider}/${modelId}: ${anthropicBetas.join(",")}`,

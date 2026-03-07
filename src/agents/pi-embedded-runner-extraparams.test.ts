@@ -1021,6 +1021,30 @@ describe("applyExtraParamsToAgent", () => {
     });
   });
 
+  it("preserves OAuth-required Anthropic betas when provider headers set anthropic-beta", () => {
+    const headers = runAnthropicHeaderCase({
+      cfg: {
+        models: {
+          providers: {
+            anthropic: {
+              headers: {
+                "anthropic-beta": "extended-cache-ttl-2025-04-11,context-1m-2025-08-07",
+              },
+            },
+          },
+        },
+      },
+      modelId: "claude-opus-4-6",
+      options: {
+        apiKey: "sk-ant-oat01-test-oauth-token",
+      },
+    });
+
+    expect(headers?.["anthropic-beta"]).toBe(
+      "claude-code-20250219,oauth-2025-04-20,fine-grained-tool-streaming-2025-05-14,interleaved-thinking-2025-05-14,extended-cache-ttl-2025-04-11",
+    );
+  });
+
   it("ignores context1m for non-Opus/Sonnet Anthropic models", () => {
     const cfg = buildAnthropicModelConfig("anthropic/claude-haiku-3-5", { context1m: true });
     const headers = runAnthropicHeaderCase({
