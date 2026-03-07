@@ -4,7 +4,11 @@ import type { ThinkLevel } from "../../auto-reply/thinking.js";
 import { generateSecureToken } from "../../infra/secure-random.js";
 import { getGlobalHookRunner } from "../../plugins/hook-runner-global.js";
 import type { PluginHookBeforeAgentStartResult } from "../../plugins/types.js";
-import { enqueueCommandInLane } from "../../process/command-queue.js";
+import {
+  enqueueCommandInLane,
+  getLaneSnapshot,
+  setCommandLaneConcurrency,
+} from "../../process/command-queue.js";
 import { isMarkdownCapableMessageChannel } from "../../utils/message-channel.js";
 import { resolveOpenClawAgentDir } from "../agent-paths.js";
 import { hasConfiguredModelFallbacks } from "../agent-scope.js";
@@ -236,6 +240,185 @@ function buildErrorAgentMeta(params: {
     ...(promptTokens ? { promptTokens } : {}),
   };
 }
+
+type ProviderLaneFailureCause = "rate_limit" | "quota";
+
+type ProviderLaneFailureState = {
+  cause: ProviderLaneFailureCause;
+  consecutiveFailures: number;
+  cooldownUntil?: number;
+  lastFailureAt: number;
+  lastMessage: string;
+};
+
+const ANTHROPIC_PROVIDER_LANE_MAX_CONCURRENT = 1;
+const PROVIDER_FAILURE_WINDOW_MS = 10 * 60 * 1000;
+const PROVIDER_RATE_LIMIT_THRESHOLD = 2;
+const PROVIDER_QUOTA_THRESHOLD = 1;
+const PROVIDER_RATE_LIMIT_BASE_BACKOFF_MS = 15 * 1000;
+const PROVIDER_RATE_LIMIT_MAX_BACKOFF_MS = 2 * 60 * 1000;
+const PROVIDER_QUOTA_BASE_BACKOFF_MS = 60 * 1000;
+const PROVIDER_QUOTA_MAX_BACKOFF_MS = 15 * 60 * 1000;
+const PROVIDER_QUOTA_HINT_RE =
+  /\bquota\b|resource(?:_|\s+)exhausted|usage limit|\btpm\b|tokens per minute|exceeded your current quota/i;
+const providerLaneFailures = new Map<string, ProviderLaneFailureState>();
+
+function shouldThrottleProviderLane(provider: string): boolean {
+  return normalizeProviderId(provider) === "anthropic";
+}
+
+function resolveProviderExecutionLane(provider: string): string {
+  return `provider:${normalizeProviderId(provider)}`;
+}
+
+function resolveProviderLaneFailureKey(provider: string, sessionLane: string): string {
+  return `${normalizeProviderId(provider)}::${sessionLane}`;
+}
+
+function resolveProviderFailureCause(
+  reason: FailoverReason | null | undefined,
+  message: string,
+): ProviderLaneFailureCause | null {
+  if (reason !== "rate_limit") {
+    return null;
+  }
+  return PROVIDER_QUOTA_HINT_RE.test(message) ? "quota" : "rate_limit";
+}
+
+function calculateProviderLaneCooldownMs(
+  cause: ProviderLaneFailureCause,
+  consecutiveFailures: number,
+): number {
+  const threshold = cause === "quota" ? PROVIDER_QUOTA_THRESHOLD : PROVIDER_RATE_LIMIT_THRESHOLD;
+  const exponent = Math.max(0, consecutiveFailures - threshold);
+  const baseMs =
+    cause === "quota" ? PROVIDER_QUOTA_BASE_BACKOFF_MS : PROVIDER_RATE_LIMIT_BASE_BACKOFF_MS;
+  const maxMs =
+    cause === "quota" ? PROVIDER_QUOTA_MAX_BACKOFF_MS : PROVIDER_RATE_LIMIT_MAX_BACKOFF_MS;
+  return Math.min(maxMs, baseMs * 2 ** Math.min(exponent, 4));
+}
+
+function getActiveProviderLaneFailure(
+  provider: string,
+  sessionLane: string,
+  now: number = Date.now(),
+): ProviderLaneFailureState | null {
+  const key = resolveProviderLaneFailureKey(provider, sessionLane);
+  const state = providerLaneFailures.get(key);
+  if (!state) {
+    return null;
+  }
+  if (typeof state.cooldownUntil === "number" && state.cooldownUntil > now) {
+    return state;
+  }
+  if (typeof state.cooldownUntil === "number" && state.cooldownUntil <= now) {
+    providerLaneFailures.delete(key);
+  }
+  return null;
+}
+
+function recordProviderLaneFailure(params: {
+  provider: string;
+  sessionLane: string;
+  reason: FailoverReason | null | undefined;
+  message: string;
+  now?: number;
+}): ProviderLaneFailureState | null {
+  if (!shouldThrottleProviderLane(params.provider)) {
+    return null;
+  }
+  const cause = resolveProviderFailureCause(params.reason, params.message);
+  if (!cause) {
+    return null;
+  }
+  const now = params.now ?? Date.now();
+  const key = resolveProviderLaneFailureKey(params.provider, params.sessionLane);
+  const previous = providerLaneFailures.get(key);
+  const withinWindow =
+    previous &&
+    previous.cause === cause &&
+    now - previous.lastFailureAt <= PROVIDER_FAILURE_WINDOW_MS;
+  const consecutiveFailures = withinWindow ? previous.consecutiveFailures + 1 : 1;
+  const existingCooldownActive =
+    typeof previous?.cooldownUntil === "number" && previous.cooldownUntil > now;
+  let cooldownUntil = existingCooldownActive ? previous?.cooldownUntil : undefined;
+  const threshold = cause === "quota" ? PROVIDER_QUOTA_THRESHOLD : PROVIDER_RATE_LIMIT_THRESHOLD;
+  if (!cooldownUntil && consecutiveFailures >= threshold) {
+    cooldownUntil = now + calculateProviderLaneCooldownMs(cause, consecutiveFailures);
+  }
+  const nextState: ProviderLaneFailureState = {
+    cause,
+    consecutiveFailures,
+    cooldownUntil,
+    lastFailureAt: now,
+    lastMessage: params.message.trim().slice(0, 240),
+  };
+  providerLaneFailures.set(key, nextState);
+  return nextState;
+}
+
+function clearProviderLaneFailures(
+  provider: string,
+  sessionLane: string,
+): ProviderLaneFailureState | null {
+  const key = resolveProviderLaneFailureKey(provider, sessionLane);
+  const previous = providerLaneFailures.get(key) ?? null;
+  if (previous) {
+    providerLaneFailures.delete(key);
+  }
+  return previous;
+}
+
+function describeLaneSnapshot(lane: string): string {
+  const snapshot = getLaneSnapshot(lane);
+  return `lane=${snapshot.lane} laneClass=${snapshot.laneClass} depth=${snapshot.depth} queued=${snapshot.queued} active=${snapshot.active} maxConcurrent=${snapshot.maxConcurrent}`;
+}
+
+function logProviderLaneObservation(params: {
+  event: "wait" | "failure" | "cooldown" | "fast_fail" | "recovered";
+  provider: string;
+  model: string;
+  cause?: string | null;
+  sessionLane: string;
+  globalLane: string;
+  providerLane?: string;
+  waitMs?: number;
+  queuedAhead?: number;
+  consecutiveFailures?: number;
+  cooldownUntil?: number;
+  message?: string;
+}) {
+  const cooldownMs =
+    typeof params.cooldownUntil === "number"
+      ? Math.max(0, params.cooldownUntil - Date.now())
+      : undefined;
+  log.warn(
+    `[provider-lane-${params.event}] provider=${params.provider} model=${params.model} cause=${
+      params.cause ?? "unknown"
+    } session=${describeLaneSnapshot(params.sessionLane)} global=${describeLaneSnapshot(
+      params.globalLane,
+    )}${params.providerLane ? ` providerLane=${describeLaneSnapshot(params.providerLane)}` : ""}${
+      typeof params.waitMs === "number" ? ` waitMs=${params.waitMs}` : ""
+    }${typeof params.queuedAhead === "number" ? ` queuedAhead=${params.queuedAhead}` : ""}${
+      typeof params.consecutiveFailures === "number"
+        ? ` consecutiveFailures=${params.consecutiveFailures}`
+        : ""
+    }${typeof cooldownMs === "number" ? ` cooldownMs=${cooldownMs}` : ""}${
+      params.message ? ` detail="${params.message.slice(0, 200)}"` : ""
+    }`,
+  );
+}
+
+/** @internal – exposed for unit tests only */
+export const _providerLaneBackoffInternals = {
+  providerLaneFailures,
+  resolveProviderExecutionLane,
+  resolveProviderLaneFailureKey,
+  resolveProviderFailureCause,
+  clear() {
+    providerLaneFailures.clear();
+  },
+} as const;
 
 export async function runEmbeddedPiAgent(
   params: RunEmbeddedPiAgentParams,
@@ -758,71 +941,125 @@ export async function runEmbeddedPiAgent(
 
           const prompt =
             provider === "anthropic" ? scrubAnthropicRefusalMagic(params.prompt) : params.prompt;
+          const providerLane = shouldThrottleProviderLane(provider)
+            ? resolveProviderExecutionLane(provider)
+            : undefined;
+          const activeProviderCooldown = providerLane
+            ? getActiveProviderLaneFailure(provider, sessionLane)
+            : null;
+          if (activeProviderCooldown) {
+            logProviderLaneObservation({
+              event: "fast_fail",
+              provider,
+              model: modelId,
+              cause: activeProviderCooldown.cause,
+              sessionLane,
+              globalLane,
+              providerLane,
+              consecutiveFailures: activeProviderCooldown.consecutiveFailures,
+              cooldownUntil: activeProviderCooldown.cooldownUntil,
+              message: activeProviderCooldown.lastMessage,
+            });
+            throw new FailoverError(
+              `Provider ${provider} is cooling down for ${sessionLane} after repeated ${activeProviderCooldown.cause} failures.`,
+              {
+                reason: "rate_limit",
+                provider,
+                model: modelId,
+                profileId: lastProfileId,
+                status: 429,
+              },
+            );
+          }
 
-          const attempt = await runEmbeddedAttempt({
-            sessionId: params.sessionId,
-            sessionKey: params.sessionKey,
-            trigger: params.trigger,
-            messageChannel: params.messageChannel,
-            messageProvider: params.messageProvider,
-            agentAccountId: params.agentAccountId,
-            messageTo: params.messageTo,
-            messageThreadId: params.messageThreadId,
-            groupId: params.groupId,
-            groupChannel: params.groupChannel,
-            groupSpace: params.groupSpace,
-            spawnedBy: params.spawnedBy,
-            senderIsOwner: params.senderIsOwner,
-            currentChannelId: params.currentChannelId,
-            currentThreadTs: params.currentThreadTs,
-            currentMessageId: params.currentMessageId,
-            replyToMode: params.replyToMode,
-            hasRepliedRef: params.hasRepliedRef,
-            sessionFile: params.sessionFile,
-            workspaceDir: resolvedWorkspace,
-            agentDir,
-            config: params.config,
-            skillsSnapshot: params.skillsSnapshot,
-            prompt,
-            images: params.images,
-            disableTools: params.disableTools,
-            provider,
-            modelId,
-            model,
-            authStorage,
-            modelRegistry,
-            agentId: workspaceResolution.agentId,
-            legacyBeforeAgentStartResult,
-            thinkLevel,
-            verboseLevel: params.verboseLevel,
-            reasoningLevel: params.reasoningLevel,
-            toolResultFormat: resolvedToolResultFormat,
-            execOverrides: params.execOverrides,
-            bashElevated: params.bashElevated,
-            timeoutMs: params.timeoutMs,
-            runId: params.runId,
-            abortSignal: params.abortSignal,
-            shouldEmitToolResult: params.shouldEmitToolResult,
-            shouldEmitToolOutput: params.shouldEmitToolOutput,
-            onPartialReply: params.onPartialReply,
-            onAssistantMessageStart: params.onAssistantMessageStart,
-            onBlockReply: params.onBlockReply,
-            onBlockReplyFlush: params.onBlockReplyFlush,
-            blockReplyBreak: params.blockReplyBreak,
-            blockReplyChunking: params.blockReplyChunking,
-            onReasoningStream: params.onReasoningStream,
-            onReasoningEnd: params.onReasoningEnd,
-            onToolResult: params.onToolResult,
-            onAgentEvent: params.onAgentEvent,
-            extraSystemPrompt: params.extraSystemPrompt,
-            inputProvenance: params.inputProvenance,
-            streamParams: params.streamParams,
-            ownerNumbers: params.ownerNumbers,
-            enforceFinalTag: params.enforceFinalTag,
-            bootstrapPromptWarningSignaturesSeen,
-            bootstrapPromptWarningSignature:
-              bootstrapPromptWarningSignaturesSeen[bootstrapPromptWarningSignaturesSeen.length - 1],
-          });
+          const runAttemptNow = () =>
+            runEmbeddedAttempt({
+              sessionId: params.sessionId,
+              sessionKey: params.sessionKey,
+              trigger: params.trigger,
+              messageChannel: params.messageChannel,
+              messageProvider: params.messageProvider,
+              agentAccountId: params.agentAccountId,
+              messageTo: params.messageTo,
+              messageThreadId: params.messageThreadId,
+              groupId: params.groupId,
+              groupChannel: params.groupChannel,
+              groupSpace: params.groupSpace,
+              spawnedBy: params.spawnedBy,
+              senderIsOwner: params.senderIsOwner,
+              currentChannelId: params.currentChannelId,
+              currentThreadTs: params.currentThreadTs,
+              currentMessageId: params.currentMessageId,
+              replyToMode: params.replyToMode,
+              hasRepliedRef: params.hasRepliedRef,
+              sessionFile: params.sessionFile,
+              workspaceDir: resolvedWorkspace,
+              agentDir,
+              config: params.config,
+              skillsSnapshot: params.skillsSnapshot,
+              prompt,
+              images: params.images,
+              disableTools: params.disableTools,
+              provider,
+              modelId,
+              model,
+              authStorage,
+              modelRegistry,
+              agentId: workspaceResolution.agentId,
+              legacyBeforeAgentStartResult,
+              thinkLevel,
+              verboseLevel: params.verboseLevel,
+              reasoningLevel: params.reasoningLevel,
+              toolResultFormat: resolvedToolResultFormat,
+              execOverrides: params.execOverrides,
+              bashElevated: params.bashElevated,
+              timeoutMs: params.timeoutMs,
+              runId: params.runId,
+              abortSignal: params.abortSignal,
+              shouldEmitToolResult: params.shouldEmitToolResult,
+              shouldEmitToolOutput: params.shouldEmitToolOutput,
+              onPartialReply: params.onPartialReply,
+              onAssistantMessageStart: params.onAssistantMessageStart,
+              onBlockReply: params.onBlockReply,
+              onBlockReplyFlush: params.onBlockReplyFlush,
+              blockReplyBreak: params.blockReplyBreak,
+              blockReplyChunking: params.blockReplyChunking,
+              onReasoningStream: params.onReasoningStream,
+              onReasoningEnd: params.onReasoningEnd,
+              onToolResult: params.onToolResult,
+              onAgentEvent: params.onAgentEvent,
+              extraSystemPrompt: params.extraSystemPrompt,
+              inputProvenance: params.inputProvenance,
+              streamParams: params.streamParams,
+              ownerNumbers: params.ownerNumbers,
+              enforceFinalTag: params.enforceFinalTag,
+              bootstrapPromptWarningSignaturesSeen,
+              bootstrapPromptWarningSignature:
+                bootstrapPromptWarningSignaturesSeen[
+                  bootstrapPromptWarningSignaturesSeen.length - 1
+                ],
+            });
+          const attempt = providerLane
+            ? await (() => {
+                setCommandLaneConcurrency(providerLane, ANTHROPIC_PROVIDER_LANE_MAX_CONCURRENT);
+                return enqueueCommandInLane(providerLane, runAttemptNow, {
+                  warnAfterMs: 5_000,
+                  onWait: (waitMs, queuedAhead) => {
+                    logProviderLaneObservation({
+                      event: "wait",
+                      provider,
+                      model: modelId,
+                      cause: "queued",
+                      sessionLane,
+                      globalLane,
+                      providerLane,
+                      waitMs,
+                      queuedAhead,
+                    });
+                  },
+                });
+              })()
+            : await runAttemptNow();
 
           const {
             aborted,
@@ -1125,6 +1362,29 @@ export async function runEmbeddedPiAgent(
               profileId: lastProfileId,
               reason: promptFailoverReason,
             });
+            const promptProviderLaneFailure = recordProviderLaneFailure({
+              provider,
+              sessionLane,
+              reason: promptFailoverReason,
+              message: errorText,
+            });
+            if (promptProviderLaneFailure) {
+              logProviderLaneObservation({
+                event:
+                  typeof promptProviderLaneFailure.cooldownUntil === "number"
+                    ? "cooldown"
+                    : "failure",
+                provider,
+                model: modelId,
+                cause: promptProviderLaneFailure.cause,
+                sessionLane,
+                globalLane,
+                providerLane: resolveProviderExecutionLane(provider),
+                consecutiveFailures: promptProviderLaneFailure.consecutiveFailures,
+                cooldownUntil: promptProviderLaneFailure.cooldownUntil,
+                message: errorText,
+              });
+            }
             if (
               isFailoverErrorMessage(errorText) &&
               promptFailoverReason !== "timeout" &&
@@ -1212,6 +1472,33 @@ export async function runEmbeddedPiAgent(
             (!aborted && failoverFailure) || (timedOut && !timedOutDuringCompaction);
 
           if (shouldRotate) {
+            const assistantProviderLaneFailure = recordProviderLaneFailure({
+              provider: activeErrorContext.provider,
+              sessionLane,
+              reason: assistantFailoverReason,
+              message:
+                lastAssistant?.errorMessage?.trim() ||
+                formattedAssistantErrorText ||
+                (timedOut ? "LLM request timed out." : "LLM request failed."),
+            });
+            if (assistantProviderLaneFailure) {
+              logProviderLaneObservation({
+                event:
+                  typeof assistantProviderLaneFailure.cooldownUntil === "number"
+                    ? "cooldown"
+                    : "failure",
+                provider: activeErrorContext.provider,
+                model: activeErrorContext.model,
+                cause: assistantProviderLaneFailure.cause,
+                sessionLane,
+                globalLane,
+                providerLane: resolveProviderExecutionLane(activeErrorContext.provider),
+                consecutiveFailures: assistantProviderLaneFailure.consecutiveFailures,
+                cooldownUntil: assistantProviderLaneFailure.cooldownUntil,
+                message:
+                  lastAssistant?.errorMessage?.trim() || formattedAssistantErrorText || undefined,
+              });
+            }
             if (lastProfileId) {
               const reason =
                 timedOut || assistantFailoverReason === "timeout"
@@ -1344,6 +1631,23 @@ export async function runEmbeddedPiAgent(
           log.debug(
             `embedded run done: runId=${params.runId} sessionId=${params.sessionId} durationMs=${Date.now() - started} aborted=${aborted}`,
           );
+          const clearedProviderLaneFailure = clearProviderLaneFailures(
+            lastAssistant?.provider ?? provider,
+            sessionLane,
+          );
+          if (clearedProviderLaneFailure) {
+            logProviderLaneObservation({
+              event: "recovered",
+              provider: lastAssistant?.provider ?? provider,
+              model: lastAssistant?.model ?? model.id,
+              cause: clearedProviderLaneFailure.cause,
+              sessionLane,
+              globalLane,
+              providerLane: resolveProviderExecutionLane(lastAssistant?.provider ?? provider),
+              consecutiveFailures: clearedProviderLaneFailure.consecutiveFailures,
+              message: clearedProviderLaneFailure.lastMessage,
+            });
+          }
           if (lastProfileId) {
             await markAuthProfileGood({
               store: authStore,

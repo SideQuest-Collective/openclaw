@@ -668,6 +668,50 @@ describe("runWithModelFallback", () => {
     ]);
   });
 
+  it("constrains broad anthropic fallback chains behind codex-primary routing", async () => {
+    const cfg = makeCfg({
+      agents: {
+        defaults: {
+          model: {
+            primary: "openai-codex/gpt-5.3-codex",
+            fallbacks: [
+              "anthropic/claude-opus-4-6",
+              "anthropic/claude-sonnet-4-5-20250929",
+              "openrouter/deepseek-chat",
+            ],
+          },
+        },
+      },
+    });
+
+    const run = vi.fn().mockImplementation(async (provider, model) => {
+      if (provider === "openai-codex" && model === "gpt-5.3-codex") {
+        throw Object.assign(new Error("429 quota exceeded"), { status: 429 });
+      }
+      if (provider === "anthropic" && model === "claude-opus-4-6") {
+        throw Object.assign(new Error("429 quota exceeded"), { status: 429 });
+      }
+      if (provider === "openrouter" && model === "openrouter/deepseek-chat") {
+        return "openrouter-ok";
+      }
+      throw new Error(`unexpected fallback candidate: ${provider}/${model}`);
+    });
+
+    const result = await runWithModelFallback({
+      cfg,
+      provider: "openai-codex",
+      model: "gpt-5.3-codex",
+      run,
+    });
+
+    expect(result.result).toBe("openrouter-ok");
+    expect(run.mock.calls).toEqual([
+      ["openai-codex", "gpt-5.3-codex"],
+      ["anthropic", "claude-opus-4-6"],
+      ["openrouter", "openrouter/deepseek-chat"],
+    ]);
+  });
+
   it("defaults provider/model when missing (regression #946)", async () => {
     const cfg = makeCfg({
       agents: {

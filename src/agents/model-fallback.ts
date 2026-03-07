@@ -22,6 +22,7 @@ import {
   buildModelAliasIndex,
   modelKey,
   normalizeModelRef,
+  normalizeProviderId,
   resolveConfiguredModelRef,
   resolveModelRefFromString,
 } from "./model-selection.js";
@@ -296,6 +297,10 @@ function resolveFallbackCandidates(params: {
     // Same provider: always use full fallback chain (model version differences within provider).
     return configuredFallbacks;
   })();
+  const constrainAnthropicFallbacks =
+    params.fallbacksOverride === undefined &&
+    normalizeProviderId(configuredPrimary.provider) !== "anthropic";
+  let anthropicFallbacksAdded = 0;
 
   for (const raw of modelFallbacks) {
     const resolved = resolveModelRefFromString({
@@ -305,6 +310,12 @@ function resolveFallbackCandidates(params: {
     });
     if (!resolved) {
       continue;
+    }
+    if (constrainAnthropicFallbacks && normalizeProviderId(resolved.ref.provider) === "anthropic") {
+      if (anthropicFallbacksAdded >= 1) {
+        continue;
+      }
+      anthropicFallbacksAdded += 1;
     }
     // Fallbacks are explicit user intent; do not silently filter them by the
     // model allowlist.

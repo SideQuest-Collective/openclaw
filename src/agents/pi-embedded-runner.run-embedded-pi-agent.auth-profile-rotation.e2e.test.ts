@@ -34,15 +34,20 @@ vi.mock("./models-config.js", async (importOriginal) => {
 });
 
 let runEmbeddedPiAgent: typeof import("./pi-embedded-runner/run.js").runEmbeddedPiAgent;
+let providerLaneBackoffInternals:
+  | typeof import("./pi-embedded-runner/run.js")._providerLaneBackoffInternals
+  | undefined;
 
 beforeAll(async () => {
-  ({ runEmbeddedPiAgent } = await import("./pi-embedded-runner/run.js"));
+  ({ runEmbeddedPiAgent, _providerLaneBackoffInternals: providerLaneBackoffInternals } =
+    await import("./pi-embedded-runner/run.js"));
 });
 
 beforeEach(() => {
   vi.useRealTimers();
   runEmbeddedAttemptMock.mockClear();
   resolveCopilotApiTokenMock.mockReset();
+  providerLaneBackoffInternals?.clear();
 });
 
 const baseUsage = {
@@ -104,6 +109,53 @@ const makeConfig = (opts?: { fallbacks?: string[]; apiKey?: string }): OpenClawC
             {
               id: "mock-1",
               name: "Mock 1",
+              reasoning: false,
+              input: ["text"],
+              cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+              contextWindow: 16_000,
+              maxTokens: 2048,
+            },
+          ],
+        },
+      },
+    },
+  }) satisfies OpenClawConfig;
+
+const makeAnthropicFallbackConfig = (): OpenClawConfig =>
+  ({
+    agents: {
+      defaults: {
+        model: {
+          fallbacks: ["openai/mock-openai"],
+        },
+      },
+    },
+    models: {
+      providers: {
+        anthropic: {
+          api: "anthropic",
+          apiKey: "anth-test",
+          baseUrl: "https://example.com",
+          models: [
+            {
+              id: "mock-anthropic",
+              name: "Mock Anthropic",
+              reasoning: false,
+              input: ["text"],
+              cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+              contextWindow: 16_000,
+              maxTokens: 2048,
+            },
+          ],
+        },
+        openai: {
+          api: "openai-responses",
+          apiKey: "sk-test",
+          baseUrl: "https://example.com",
+          models: [
+            {
+              id: "mock-openai",
+              name: "Mock OpenAI",
               reasoning: false,
               input: ["text"],
               cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
@@ -924,6 +976,74 @@ describe("runEmbeddedPiAgent auth profile rotation", () => {
         process.env.OPENAI_API_KEY = previousOpenAiKey;
       }
     }
+  });
+
+  it("fast-fails repeated anthropic quota lanes before reissuing another provider call", async () => {
+    await withTimedAgentWorkspace(async ({ agentDir, workspaceDir }) => {
+      const authPath = path.join(agentDir, "auth-profiles.json");
+      await fs.writeFile(authPath, JSON.stringify({ version: 1, profiles: {}, usageStats: {} }));
+
+      runEmbeddedAttemptMock.mockResolvedValueOnce(
+        makeAttempt({
+          assistantTexts: [],
+          lastAssistant: buildAssistant({
+            provider: "anthropic",
+            model: "mock-anthropic",
+            stopReason: "error",
+            errorMessage: "429 quota exceeded",
+          }),
+        }),
+      );
+
+      await expect(
+        runEmbeddedPiAgent({
+          sessionId: "session:test",
+          sessionKey: "agent:test:anthropic-fast-fail",
+          sessionFile: path.join(workspaceDir, "session.jsonl"),
+          workspaceDir,
+          agentDir,
+          config: makeAnthropicFallbackConfig(),
+          prompt: "hello",
+          provider: "anthropic",
+          model: "mock-anthropic",
+          authProfileIdSource: "auto",
+          timeoutMs: 5_000,
+          runId: "run:anthropic-fast-fail-1",
+        }),
+      ).rejects.toMatchObject({
+        name: "FailoverError",
+        reason: "rate_limit",
+        provider: "anthropic",
+        model: "mock-anthropic",
+      });
+
+      expect(runEmbeddedAttemptMock).toHaveBeenCalledTimes(1);
+      runEmbeddedAttemptMock.mockClear();
+
+      await expect(
+        runEmbeddedPiAgent({
+          sessionId: "session:test",
+          sessionKey: "agent:test:anthropic-fast-fail",
+          sessionFile: path.join(workspaceDir, "session.jsonl"),
+          workspaceDir,
+          agentDir,
+          config: makeAnthropicFallbackConfig(),
+          prompt: "hello again",
+          provider: "anthropic",
+          model: "mock-anthropic",
+          authProfileIdSource: "auto",
+          timeoutMs: 5_000,
+          runId: "run:anthropic-fast-fail-2",
+        }),
+      ).rejects.toMatchObject({
+        name: "FailoverError",
+        reason: "rate_limit",
+        provider: "anthropic",
+        model: "mock-anthropic",
+      });
+
+      expect(runEmbeddedAttemptMock).not.toHaveBeenCalled();
+    });
   });
 
   it("uses the active erroring model in billing failover errors", async () => {

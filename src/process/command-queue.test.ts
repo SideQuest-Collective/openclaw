@@ -17,18 +17,21 @@ vi.mock("../logging/diagnostic.js", () => ({
 }));
 
 import {
+  classifyLane,
   clearCommandLane,
   CommandLaneClearedError,
   enqueueCommand,
   enqueueCommandInLane,
   GatewayDrainingError,
   getActiveTaskCount,
+  getLaneSnapshot,
   getQueueSize,
   markGatewayDraining,
   resetAllLanes,
   setCommandLaneConcurrency,
   waitForActiveTasks,
 } from "./command-queue.js";
+import { CommandLane } from "./lanes.js";
 
 function createDeferred(): { promise: Promise<void>; resolve: () => void } {
   let resolve!: () => void;
@@ -101,6 +104,40 @@ describe("command queue", () => {
     expect(diagnosticMocks.logLaneEnqueue.mock.calls[0]?.[1]).toBe(1);
 
     await task;
+  });
+
+  it("reports lane snapshots with lane class and depth", async () => {
+    const lane = "provider:anthropic";
+    setCommandLaneConcurrency(lane, 1);
+
+    const deferred = createDeferred();
+    const first = enqueueCommandInLane(lane, async () => {
+      await deferred.promise;
+      return "first";
+    });
+    const second = enqueueCommandInLane(lane, async () => "second");
+
+    await vi.waitFor(() => {
+      const snapshot = getLaneSnapshot(lane);
+      expect(snapshot.active).toBe(1);
+      expect(snapshot.queued).toBe(1);
+    });
+
+    expect(classifyLane(CommandLane.Main)).toBe("main");
+    expect(classifyLane("")).toBe("main");
+    expect(classifyLane(lane)).toBe("provider");
+    expect(getLaneSnapshot(lane)).toMatchObject({
+      lane,
+      laneClass: "provider",
+      depth: 2,
+      queued: 1,
+      active: 1,
+      maxConcurrent: 1,
+    });
+
+    deferred.resolve();
+    await expect(first).resolves.toBe("first");
+    await expect(second).resolves.toBe("second");
   });
 
   it("invokes onWait callback when a task waits past the threshold", async () => {

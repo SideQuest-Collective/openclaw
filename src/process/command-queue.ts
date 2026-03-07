@@ -49,6 +49,16 @@ type LaneState = {
   generation: number;
 };
 
+export type LaneSnapshot = {
+  lane: string;
+  laneClass: string;
+  depth: number;
+  queued: number;
+  active: number;
+  maxConcurrent: number;
+  oldestQueuedAgeMs: number | null;
+};
+
 const lanes = new Map<string, LaneState>();
 let nextTaskId = 1;
 
@@ -101,7 +111,7 @@ function drainLane(lane: string) {
             diag.error(`lane onWait callback failed: lane=${lane} error="${String(err)}"`);
           }
           diag.warn(
-            `lane wait exceeded: lane=${lane} waitedMs=${waitedMs} queueAhead=${state.queue.length}`,
+            `lane wait exceeded: lane=${lane} laneClass=${classifyLane(lane)} waitedMs=${waitedMs} queueAhead=${state.queue.length} depth=${state.queue.length + state.activeTaskIds.size} active=${state.activeTaskIds.size} maxConcurrent=${state.maxConcurrent}`,
           );
         }
         logLaneDequeue(lane, waitedMs, state.queue.length);
@@ -141,6 +151,11 @@ function drainLane(lane: string) {
   };
 
   pump();
+}
+
+export function classifyLane(lane: string): string {
+  const [prefix] = lane.split(":");
+  return prefix || CommandLane.Main;
 }
 
 /**
@@ -211,6 +226,54 @@ export function getTotalQueueSize() {
     total += s.queue.length + s.activeTaskIds.size;
   }
   return total;
+}
+
+export function getLaneSnapshots(): LaneSnapshot[] {
+  const now = Date.now();
+  return [...lanes.values()]
+    .map((state) => ({
+      lane: state.lane,
+      laneClass: classifyLane(state.lane),
+      depth: state.queue.length + state.activeTaskIds.size,
+      queued: state.queue.length,
+      active: state.activeTaskIds.size,
+      maxConcurrent: state.maxConcurrent,
+      oldestQueuedAgeMs:
+        state.queue.length > 0 ? Math.max(0, now - state.queue[0].enqueuedAt) : null,
+    }))
+    .toSorted((left, right) => {
+      const backlogDiff = right.depth - left.depth;
+      if (backlogDiff !== 0) {
+        return backlogDiff;
+      }
+      return left.lane.localeCompare(right.lane);
+    });
+}
+
+export function getLaneSnapshot(lane: string = CommandLane.Main): LaneSnapshot {
+  const resolved = lane.trim() || CommandLane.Main;
+  const state = lanes.get(resolved);
+  const now = Date.now();
+  if (!state) {
+    return {
+      lane: resolved,
+      laneClass: classifyLane(resolved),
+      depth: 0,
+      queued: 0,
+      active: 0,
+      maxConcurrent: 1,
+      oldestQueuedAgeMs: null,
+    };
+  }
+  return {
+    lane: state.lane,
+    laneClass: classifyLane(state.lane),
+    depth: state.queue.length + state.activeTaskIds.size,
+    queued: state.queue.length,
+    active: state.activeTaskIds.size,
+    maxConcurrent: state.maxConcurrent,
+    oldestQueuedAgeMs: state.queue.length > 0 ? Math.max(0, now - state.queue[0].enqueuedAt) : null,
+  };
 }
 
 export function clearCommandLane(lane: string = CommandLane.Main) {
