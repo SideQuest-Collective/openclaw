@@ -1861,4 +1861,115 @@ describe("gateway server sessions", () => {
 
     ws.close();
   });
+
+  test("bootstrap persists runtime session id in canonical store entry", async () => {
+    const { storePath } = await createSessionStoreDir();
+    const { ws } = await openClient({ scopes: ["operator.admin"] });
+
+    const bootstrap = await rpcReq<{
+      session_identity?: {
+        agent_id?: string;
+        session_id?: string;
+        session_key_source?: string;
+      };
+      bootstrap_complete?: boolean;
+    }>(ws, "sessions.bootstrap", {
+      agent_id: "main",
+      session_identity: {
+        agent_id: "main",
+        session_id: "sess-live-main",
+        session_key_source: "snapshot",
+      },
+    });
+
+    expect(bootstrap.ok).toBe(true);
+    expect(bootstrap.payload?.bootstrap_complete).toBe(true);
+
+    const store = JSON.parse(await fs.readFile(storePath, "utf-8")) as Record<
+      string,
+      { sessionId?: string }
+    >;
+    // After P2-A fix, the canonical entry must carry the negotiated runtime
+    // session id — not a random UUID.
+    expect(store["agent:main:main"]?.sessionId).toBe("sess-live-main");
+
+    ws.close();
+  });
+
+  test("presence.init persists runtime session id in canonical store entry", async () => {
+    const { storePath } = await createSessionStoreDir();
+    const { ws } = await openClient({ scopes: ["operator.admin"] });
+
+    const presence = await rpcReq<{
+      peers_discovered?: number;
+      session_identity?: {
+        agent_id?: string;
+        session_id?: string;
+        session_key_source?: string;
+      };
+    }>(ws, "presence.init", {
+      agent_id: "main",
+      session_identity: {
+        agent_id: "main",
+        session_id: "sess-live-main",
+        session_key_source: "snapshot",
+      },
+    });
+
+    expect(presence.ok).toBe(true);
+    expect(presence.payload?.peers_discovered).toBe(0);
+
+    const store = JSON.parse(await fs.readFile(storePath, "utf-8")) as Record<
+      string,
+      { sessionId?: string }
+    >;
+    // After P2-A fix, presence.init must also persist the runtime session id.
+    expect(store["agent:main:main"]?.sessionId).toBe("sess-live-main");
+
+    ws.close();
+  });
+
+  test("transcript.read returns empty transcript for freshly-bootstrapped session with no transcript file", async () => {
+    await createSessionStoreDir();
+    const { ws } = await openClient({ scopes: ["operator.admin"] });
+
+    // Bootstrap with a snapshot identity that has a real runtime id
+    const bootstrap = await rpcReq<{
+      bootstrap_complete?: boolean;
+    }>(ws, "sessions.bootstrap", {
+      agent_id: "main",
+      session_identity: {
+        agent_id: "main",
+        session_id: "sess-fresh",
+        session_key_source: "snapshot",
+      },
+    });
+    expect(bootstrap.ok).toBe(true);
+    expect(bootstrap.payload?.bootstrap_complete).toBe(true);
+
+    // Immediately read transcript — no transcript file exists on disk
+    const transcript = await rpcReq<{
+      entries?: Array<{ role?: string; text?: string }>;
+      has_more?: boolean;
+      cursor?: string | null;
+    }>(ws, "transcript.read", {
+      agent_id: "main",
+      session_identity: {
+        agent_id: "main",
+        session_id: "sess-fresh",
+        session_key_source: "snapshot",
+      },
+      lookup_key: "main",
+      lookup_type: "context_id",
+      limit: 10,
+    });
+
+    // After P2-B fix, this must succeed with an empty transcript instead of erroring.
+    expect(transcript.ok).toBe(true);
+    expect(transcript.payload?.entries).toEqual([]);
+    expect(transcript.payload?.has_more).toBe(false);
+    expect(transcript.payload?.cursor).toBeNull();
+
+    ws.close();
+  });
 });
