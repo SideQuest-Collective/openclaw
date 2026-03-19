@@ -9,6 +9,7 @@ import { clearSessionQueues } from "../../auto-reply/reply/queue.js";
 import { loadConfig } from "../../config/config.js";
 import {
   loadSessionStore,
+  mergeSessionEntry,
   snapshotSessionOrigin,
   resolveMainSessionKey,
   type SessionEntry,
@@ -19,8 +20,10 @@ import { logVerbose } from "../../globals.js";
 import { createInternalHookEvent, triggerInternalHook } from "../../hooks/internal-hooks.js";
 import { getGlobalHookRunner } from "../../plugins/hook-runner-global.js";
 import {
+  buildAgentMainSessionKey,
   isSubagentSessionKey,
   normalizeAgentId,
+  normalizeMainKey,
   parseAgentSessionKey,
 } from "../../routing/session-key.js";
 import { GATEWAY_CLIENT_IDS } from "../protocol/client-info.js";
@@ -42,6 +45,7 @@ import {
   loadCombinedSessionStoreForGateway,
   loadSessionEntry,
   pruneLegacyStoreKeys,
+  readSessionMessages,
   readSessionPreviewItemsFromTranscript,
   resolveGatewaySessionStoreTarget,
   resolveSessionModelRef,
@@ -310,6 +314,373 @@ async function cleanupSessionBeforeMutation(params: {
   });
 }
 
+type GatewaySessionIdentity = {
+  agent_id: string;
+  session_id: string;
+  session_key_source: "snapshot" | "fallback";
+};
+
+type SessionBootstrapCapabilityParams = {
+  agent_id: string;
+  session_identity: GatewaySessionIdentity;
+};
+
+type TranscriptReadCapabilityParams = {
+  agent_id: string;
+  session_identity: GatewaySessionIdentity;
+  lookup_key: string;
+  lookup_type: "task_id" | "context_id" | "session_id";
+  limit?: number;
+  cursor?: string;
+};
+
+type TranscriptEntry = {
+  role: "user" | "agent" | "system" | "tool";
+  text?: string;
+  metadata?: Record<string, unknown>;
+  timestamp?: string;
+};
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return !!value && typeof value === "object" && !Array.isArray(value);
+}
+
+function parseGatewaySessionIdentity(value: unknown): GatewaySessionIdentity | null {
+  if (!isRecord(value)) {
+    return null;
+  }
+  const agentId = typeof value.agent_id === "string" ? value.agent_id.trim() : "";
+  const sessionId = typeof value.session_id === "string" ? value.session_id.trim() : "";
+  const sessionKeySource = value.session_key_source;
+  if (
+    !agentId ||
+    !sessionId ||
+    (sessionKeySource !== "snapshot" && sessionKeySource !== "fallback")
+  ) {
+    return null;
+  }
+  return {
+    agent_id: agentId,
+    session_id: sessionId,
+    session_key_source: sessionKeySource,
+  };
+}
+
+function parseSessionCapabilityParams(
+  params: unknown,
+  method: "sessions.bootstrap" | "presence.init",
+  respond: RespondFn,
+): SessionBootstrapCapabilityParams | null {
+  if (!isRecord(params)) {
+    respond(
+      false,
+      undefined,
+      errorShape(ErrorCodes.INVALID_REQUEST, `${method} params must be an object`),
+    );
+    return null;
+  }
+  const agentId = typeof params.agent_id === "string" ? params.agent_id.trim() : "";
+  const sessionIdentity = parseGatewaySessionIdentity(params.session_identity);
+  if (!agentId || !sessionIdentity) {
+    respond(
+      false,
+      undefined,
+      errorShape(
+        ErrorCodes.INVALID_REQUEST,
+        `invalid ${method} params: agent_id and session_identity are required`,
+      ),
+    );
+    return null;
+  }
+  if (normalizeAgentId(agentId) !== normalizeAgentId(sessionIdentity.agent_id)) {
+    respond(
+      false,
+      undefined,
+      errorShape(ErrorCodes.INVALID_REQUEST, `${method} agent_id/session_identity mismatch`),
+    );
+    return null;
+  }
+  return {
+    agent_id: agentId,
+    session_identity: sessionIdentity,
+  };
+}
+
+function parseTranscriptReadCapabilityParams(
+  params: unknown,
+  respond: RespondFn,
+): TranscriptReadCapabilityParams | null {
+  if (!isRecord(params)) {
+    respond(
+      false,
+      undefined,
+      errorShape(ErrorCodes.INVALID_REQUEST, "transcript.read params must be an object"),
+    );
+    return null;
+  }
+  const agentId = typeof params.agent_id === "string" ? params.agent_id.trim() : "";
+  const sessionIdentity = parseGatewaySessionIdentity(params.session_identity);
+  const lookupKey = typeof params.lookup_key === "string" ? params.lookup_key.trim() : "";
+  const lookupType = params.lookup_type;
+  const cursor = typeof params.cursor === "string" ? params.cursor.trim() : undefined;
+  const limitRaw = params.limit;
+  const limit =
+    typeof limitRaw === "number" && Number.isFinite(limitRaw)
+      ? Math.max(1, Math.min(200, Math.floor(limitRaw)))
+      : undefined;
+  if (
+    !agentId ||
+    !sessionIdentity ||
+    !lookupKey ||
+    (lookupType !== "task_id" && lookupType !== "context_id" && lookupType !== "session_id")
+  ) {
+    respond(
+      false,
+      undefined,
+      errorShape(
+        ErrorCodes.INVALID_REQUEST,
+        "invalid transcript.read params: agent_id, session_identity, lookup_key, and lookup_type are required",
+      ),
+    );
+    return null;
+  }
+  if (normalizeAgentId(agentId) !== normalizeAgentId(sessionIdentity.agent_id)) {
+    respond(
+      false,
+      undefined,
+      errorShape(ErrorCodes.INVALID_REQUEST, "transcript.read agent_id/session_identity mismatch"),
+    );
+    return null;
+  }
+  return {
+    agent_id: agentId,
+    session_identity: sessionIdentity,
+    lookup_key: lookupKey,
+    lookup_type: lookupType,
+    ...(limit !== undefined ? { limit } : {}),
+    ...(cursor ? { cursor } : {}),
+  };
+}
+
+function resolveRequestedSessionKey(params: {
+  agentId: string;
+  sessionIdentity: GatewaySessionIdentity;
+  lookupKey?: string;
+  lookupType?: TranscriptReadCapabilityParams["lookup_type"];
+}): string {
+  if (params.lookupType === "session_id" && params.lookupKey) {
+    return params.lookupKey;
+  }
+  if (
+    params.sessionIdentity.session_key_source === "snapshot" &&
+    !isResolvableGatewaySessionStoreKey({
+      agentId: params.agentId,
+      sessionId: params.sessionIdentity.session_id,
+    })
+  ) {
+    return buildGatewayMainSessionKey(params.agentId);
+  }
+  return params.sessionIdentity.session_id;
+}
+
+function buildResolvedSessionIdentity(params: {
+  requested: GatewaySessionIdentity;
+  canonicalKey: string;
+  targetAgentId: string;
+}): GatewaySessionIdentity {
+  const sessionId =
+    params.requested.session_key_source === "snapshot"
+      ? params.requested.session_id.trim()
+      : params.canonicalKey;
+  return {
+    agent_id: params.targetAgentId,
+    session_id: sessionId,
+    session_key_source: params.requested.session_key_source,
+  };
+}
+
+function isResolvableGatewaySessionStoreKey(params: {
+  agentId: string;
+  sessionId: string;
+}): boolean {
+  const trimmed = params.sessionId.trim();
+  if (!trimmed) {
+    return false;
+  }
+  const lowered = trimmed.toLowerCase();
+  if (lowered === "global" || lowered === "unknown") {
+    return true;
+  }
+  const cfg = loadConfig();
+  const mainKey = normalizeMainKey(cfg.session?.mainKey);
+  if (lowered === "main" || lowered === mainKey) {
+    return true;
+  }
+  const parsed = parseAgentSessionKey(trimmed);
+  if (!parsed) {
+    return false;
+  }
+  return normalizeAgentId(parsed.agentId) === normalizeAgentId(params.agentId);
+}
+
+function buildGatewayMainSessionKey(agentId: string): string {
+  const cfg = loadConfig();
+  return buildAgentMainSessionKey({ agentId, mainKey: cfg.session?.mainKey });
+}
+
+function findSessionEntryByRuntimeSessionId(params: { agentId: string; sessionId: string }): {
+  storePath: string;
+  sessionFile?: string;
+  canonicalKey?: string;
+} | null {
+  const cfg = loadConfig();
+  const sessionTarget = resolveGatewaySessionStoreTarget({
+    cfg,
+    key: buildGatewayMainSessionKey(params.agentId),
+    scanLegacyKeys: false,
+  });
+  const store = loadSessionStore(sessionTarget.storePath);
+  const match = Object.entries(store).find(([key, entry]) => {
+    if (entry?.sessionId !== params.sessionId) {
+      return false;
+    }
+    const parsed = parseAgentSessionKey(key);
+    return !parsed || normalizeAgentId(parsed.agentId) === normalizeAgentId(params.agentId);
+  });
+  const canonicalKey = match
+    ? resolveGatewaySessionStoreTarget({
+        cfg,
+        key: match[0],
+        scanLegacyKeys: false,
+      }).canonicalKey
+    : undefined;
+  const sessionFile = match?.[1]?.sessionFile;
+  const transcriptExists = resolveSessionTranscriptCandidates(
+    params.sessionId,
+    sessionTarget.storePath,
+    sessionFile,
+    params.agentId,
+  ).some((candidate) => fs.existsSync(candidate));
+  if (!match && !transcriptExists) {
+    return null;
+  }
+  return {
+    storePath: sessionTarget.storePath,
+    sessionFile,
+    canonicalKey,
+  };
+}
+
+async function ensureCanonicalSessionEntry(params: { key: string }): Promise<{
+  cfg: ReturnType<typeof loadConfig>;
+  target: ReturnType<typeof resolveGatewaySessionStoreTarget>;
+  storePath: string;
+  entry: SessionEntry;
+}> {
+  const { cfg, target, storePath } = resolveGatewaySessionTargetFromKey(params.key);
+  const entry = await updateSessionStore(storePath, (store) => {
+    const resolved = resolveGatewaySessionStoreTarget({
+      cfg,
+      key: params.key,
+      store,
+    });
+    pruneLegacyStoreKeys({
+      store,
+      canonicalKey: resolved.canonicalKey,
+      candidates: resolved.storeKeys,
+    });
+    const merged = mergeSessionEntry(store[resolved.canonicalKey], {
+      updatedAt: Date.now(),
+    });
+    store[resolved.canonicalKey] = merged;
+    return merged;
+  });
+  return { cfg, target, storePath, entry };
+}
+
+// Extracts text from transcript content. Only text-type content blocks are
+// included; non-text blocks (tool_use, image, etc.) are silently skipped.
+function extractTranscriptText(value: unknown): string | undefined {
+  if (typeof value === "string") {
+    const trimmed = value.trim();
+    return trimmed ? trimmed : undefined;
+  }
+  if (Array.isArray(value)) {
+    const parts = value
+      .map((entry) => {
+        if (!isRecord(entry) || typeof entry.text !== "string") {
+          return "";
+        }
+        return entry.text.trim();
+      })
+      .filter(Boolean);
+    return parts.length > 0 ? parts.join("\n") : undefined;
+  }
+  if (isRecord(value) && typeof value.text === "string") {
+    const trimmed = value.text.trim();
+    return trimmed ? trimmed : undefined;
+  }
+  return undefined;
+}
+
+function extractTranscriptTimestamp(value: unknown): string | undefined {
+  if (typeof value === "number" && Number.isFinite(value)) {
+    return new Date(value).toISOString();
+  }
+  if (typeof value === "string" && value.trim()) {
+    const parsed = Date.parse(value);
+    return Number.isFinite(parsed) ? new Date(parsed).toISOString() : undefined;
+  }
+  return undefined;
+}
+
+function mapTranscriptMessageToEntry(value: unknown): TranscriptEntry | null {
+  if (!isRecord(value)) {
+    return null;
+  }
+  const rawRole = typeof value.role === "string" ? value.role.trim().toLowerCase() : "";
+  const role =
+    rawRole === "assistant"
+      ? "agent"
+      : rawRole === "user" || rawRole === "system" || rawRole === "tool"
+        ? rawRole
+        : null;
+  if (!role) {
+    return null;
+  }
+  const text = extractTranscriptText(value.content) ?? extractTranscriptText(value.text);
+  const timestamp = extractTranscriptTimestamp(value.timestamp);
+  const metadata = isRecord(value.__openclaw) ? value.__openclaw : undefined;
+  return {
+    role,
+    ...(text ? { text } : {}),
+    ...(metadata ? { metadata } : {}),
+    ...(timestamp ? { timestamp } : {}),
+  };
+}
+
+function paginateTranscriptEntries(params: {
+  entries: TranscriptEntry[];
+  limit: number;
+  cursor?: string;
+}): { entries: TranscriptEntry[]; cursor: string | null; has_more: boolean } | { error: string } {
+  const total = params.entries.length;
+  let end = total;
+  if (params.cursor) {
+    const parsedCursor = Number.parseInt(params.cursor, 10);
+    if (!Number.isInteger(parsedCursor) || parsedCursor <= 0 || parsedCursor > total) {
+      return { error: `invalid cursor: ${params.cursor}` };
+    }
+    end = parsedCursor;
+  }
+  const start = Math.max(0, end - params.limit);
+  return {
+    entries: params.entries.slice(start, end),
+    cursor: start > 0 ? String(start) : null,
+    has_more: start > 0,
+  };
+}
+
 export const sessionsHandlers: GatewayRequestHandlers = {
   "sessions.list": ({ params, respond }) => {
     if (!assertValidParams(params, validateSessionsListParams, "sessions.list", respond)) {
@@ -387,6 +758,156 @@ export const sessionsHandlers: GatewayRequestHandlers = {
     }
 
     respond(true, { ts: Date.now(), previews } satisfies SessionsPreviewResult, undefined);
+  },
+  "sessions.bootstrap": async ({ params, respond }) => {
+    const parsed = parseSessionCapabilityParams(params, "sessions.bootstrap", respond);
+    if (!parsed) {
+      return;
+    }
+    const requestedKey = resolveRequestedSessionKey({
+      agentId: parsed.agent_id,
+      sessionIdentity: parsed.session_identity,
+    });
+    const { target } = await ensureCanonicalSessionEntry({ key: requestedKey });
+    const resolvedIdentity = buildResolvedSessionIdentity({
+      requested: parsed.session_identity,
+      canonicalKey: target.canonicalKey,
+      targetAgentId: target.agentId,
+    });
+    respond(
+      true,
+      {
+        session_identity: resolvedIdentity,
+        bootstrap_complete: true,
+      },
+      undefined,
+    );
+  },
+  "presence.init": async ({ params, respond }) => {
+    const parsed = parseSessionCapabilityParams(params, "presence.init", respond);
+    if (!parsed) {
+      return;
+    }
+    const requestedKey = resolveRequestedSessionKey({
+      agentId: parsed.agent_id,
+      sessionIdentity: parsed.session_identity,
+    });
+    const { target } = await ensureCanonicalSessionEntry({ key: requestedKey });
+    const resolvedIdentity = buildResolvedSessionIdentity({
+      requested: parsed.session_identity,
+      canonicalKey: target.canonicalKey,
+      targetAgentId: target.agentId,
+    });
+    // Deliberately keep presence.init as a canonical identity acknowledgment, not
+    // a synthetic peer-roster write. OpenClaw does not own mesh peer topology,
+    // so supporting the capability here means "the runtime accepted this session
+    // identity and is ready" rather than recreating the old chat-based shim.
+    respond(
+      true,
+      {
+        peers_discovered: 0,
+        session_identity: resolvedIdentity,
+      },
+      undefined,
+    );
+  },
+  "transcript.read": ({ params, respond }) => {
+    const parsed = parseTranscriptReadCapabilityParams(params, respond);
+    if (!parsed) {
+      return;
+    }
+
+    const runtimeSessionId =
+      parsed.lookup_type === "session_id"
+        ? parsed.lookup_key
+        : parsed.session_identity.session_key_source === "snapshot" &&
+            !isResolvableGatewaySessionStoreKey({
+              agentId: parsed.agent_id,
+              sessionId: parsed.session_identity.session_id,
+            })
+          ? parsed.session_identity.session_id
+          : null;
+    const runtimeSession = runtimeSessionId
+      ? findSessionEntryByRuntimeSessionId({
+          agentId: parsed.agent_id,
+          sessionId: runtimeSessionId,
+        })
+      : null;
+
+    let transcriptSessionId: string;
+    let transcriptStorePath: string;
+    let transcriptSessionFile: string | undefined;
+
+    if (runtimeSessionId) {
+      if (!runtimeSession) {
+        respond(
+          false,
+          undefined,
+          errorShape(ErrorCodes.INVALID_REQUEST, `session not found: ${runtimeSessionId}`),
+        );
+        return;
+      }
+      transcriptSessionId = runtimeSessionId;
+      transcriptStorePath = runtimeSession.storePath;
+      transcriptSessionFile = runtimeSession.sessionFile;
+    } else {
+      const requestedKey = resolveRequestedSessionKey({
+        agentId: parsed.agent_id,
+        sessionIdentity: parsed.session_identity,
+        lookupKey: parsed.lookup_key,
+        lookupType: parsed.lookup_type,
+      });
+      const { target } = resolveGatewaySessionTargetFromKey(requestedKey);
+      if (normalizeAgentId(parsed.agent_id) !== normalizeAgentId(target.agentId)) {
+        respond(
+          false,
+          undefined,
+          errorShape(ErrorCodes.INVALID_REQUEST, `agent not found: ${parsed.agent_id}`),
+        );
+        return;
+      }
+
+      const { entry } = loadSessionEntry(target.canonicalKey);
+      if (!entry?.sessionId) {
+        respond(
+          false,
+          undefined,
+          errorShape(ErrorCodes.INVALID_REQUEST, `session not found: ${target.canonicalKey}`),
+        );
+        return;
+      }
+      transcriptSessionId = entry.sessionId;
+      transcriptStorePath = target.storePath;
+      transcriptSessionFile = entry.sessionFile;
+    }
+
+    // Default limit: 50 entries per page, clamped to [1, 200] when provided.
+    const mappedEntries = readSessionMessages(
+      transcriptSessionId,
+      transcriptStorePath,
+      transcriptSessionFile,
+    )
+      .map(mapTranscriptMessageToEntry)
+      .filter((value): value is TranscriptEntry => value !== null);
+    const page = paginateTranscriptEntries({
+      entries: mappedEntries,
+      limit: parsed.limit ?? 50,
+      cursor: parsed.cursor,
+    });
+    if ("error" in page) {
+      respond(false, undefined, errorShape(ErrorCodes.INVALID_REQUEST, page.error));
+      return;
+    }
+
+    respond(
+      true,
+      {
+        entries: page.entries,
+        cursor: page.cursor,
+        has_more: page.has_more,
+      },
+      undefined,
+    );
   },
   "sessions.resolve": async ({ params, respond }) => {
     if (!assertValidParams(params, validateSessionsResolveParams, "sessions.resolve", respond)) {
