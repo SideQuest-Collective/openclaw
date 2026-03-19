@@ -23,6 +23,7 @@ import {
   buildAgentMainSessionKey,
   isSubagentSessionKey,
   normalizeAgentId,
+  normalizeMainKey,
   parseAgentSessionKey,
 } from "../../routing/session-key.js";
 import { GATEWAY_CLIENT_IDS } from "../protocol/client-info.js";
@@ -462,12 +463,22 @@ function parseTranscriptReadCapabilityParams(
 }
 
 function resolveRequestedSessionKey(params: {
+  agentId: string;
   sessionIdentity: GatewaySessionIdentity;
   lookupKey?: string;
   lookupType?: TranscriptReadCapabilityParams["lookup_type"];
 }): string {
   if (params.lookupType === "session_id" && params.lookupKey) {
     return params.lookupKey;
+  }
+  if (
+    params.sessionIdentity.session_key_source === "snapshot" &&
+    !isResolvableGatewaySessionStoreKey({
+      agentId: params.agentId,
+      sessionId: params.sessionIdentity.session_id,
+    })
+  ) {
+    return buildGatewayMainSessionKey(params.agentId);
   }
   return params.sessionIdentity.session_id;
 }
@@ -477,18 +488,85 @@ function buildResolvedSessionIdentity(params: {
   canonicalKey: string;
   targetAgentId: string;
 }): GatewaySessionIdentity {
-  const requestedSessionId = params.requested.session_id.trim().toLowerCase();
-  const canonicalKey = params.canonicalKey.trim().toLowerCase();
-  const requestedSource =
-    params.requested.session_key_source === "snapshot" ||
-    requestedSessionId !== canonicalKey ||
-    canonicalKey !== buildAgentMainSessionKey({ agentId: params.targetAgentId, mainKey: "main" })
-      ? "snapshot"
-      : "fallback";
+  const sessionId =
+    params.requested.session_key_source === "snapshot"
+      ? params.requested.session_id.trim()
+      : params.canonicalKey;
   return {
     agent_id: params.targetAgentId,
-    session_id: canonicalKey,
-    session_key_source: requestedSource,
+    session_id: sessionId,
+    session_key_source: params.requested.session_key_source,
+  };
+}
+
+function isResolvableGatewaySessionStoreKey(params: {
+  agentId: string;
+  sessionId: string;
+}): boolean {
+  const trimmed = params.sessionId.trim();
+  if (!trimmed) {
+    return false;
+  }
+  const lowered = trimmed.toLowerCase();
+  if (lowered === "global" || lowered === "unknown") {
+    return true;
+  }
+  const cfg = loadConfig();
+  const mainKey = normalizeMainKey(cfg.session?.mainKey);
+  if (lowered === "main" || lowered === mainKey) {
+    return true;
+  }
+  const parsed = parseAgentSessionKey(trimmed);
+  if (!parsed) {
+    return false;
+  }
+  return normalizeAgentId(parsed.agentId) === normalizeAgentId(params.agentId);
+}
+
+function buildGatewayMainSessionKey(agentId: string): string {
+  const cfg = loadConfig();
+  return buildAgentMainSessionKey({ agentId, mainKey: cfg.session?.mainKey });
+}
+
+function findSessionEntryByRuntimeSessionId(params: { agentId: string; sessionId: string }): {
+  storePath: string;
+  sessionFile?: string;
+  canonicalKey?: string;
+} | null {
+  const cfg = loadConfig();
+  const sessionTarget = resolveGatewaySessionStoreTarget({
+    cfg,
+    key: buildGatewayMainSessionKey(params.agentId),
+    scanLegacyKeys: false,
+  });
+  const store = loadSessionStore(sessionTarget.storePath);
+  const match = Object.entries(store).find(
+    ([key, entry]) =>
+      entry?.sessionId === params.sessionId &&
+      (!parseAgentSessionKey(key) ||
+        normalizeAgentId(parseAgentSessionKey(key)?.agentId) === normalizeAgentId(params.agentId)),
+  );
+  const canonicalKey = match
+    ? resolveGatewaySessionStoreTarget({
+        cfg,
+        key: match[0],
+        scanLegacyKeys: false,
+      }).canonicalKey
+    : undefined;
+  const sessionFile = match?.[1]?.sessionFile;
+  const transcriptExists = resolveSessionTranscriptCandidates(
+    params.sessionId,
+    sessionTarget.storePath,
+    sessionFile,
+    params.agentId,
+  ).some((candidate) => fs.existsSync(candidate));
+  if (!match && !transcriptExists) {
+    return null;
+  }
+  return {
+    storePath: sessionTarget.storePath,
+    sessionFile,
+    canonicalKey,
   };
 }
 
@@ -684,6 +762,7 @@ export const sessionsHandlers: GatewayRequestHandlers = {
       return;
     }
     const requestedKey = resolveRequestedSessionKey({
+      agentId: parsed.agent_id,
       sessionIdentity: parsed.session_identity,
     });
     const { target } = await ensureCanonicalSessionEntry({ key: requestedKey });
@@ -707,6 +786,7 @@ export const sessionsHandlers: GatewayRequestHandlers = {
       return;
     }
     const requestedKey = resolveRequestedSessionKey({
+      agentId: parsed.agent_id,
       sessionIdentity: parsed.session_identity,
     });
     const { target } = await ensureCanonicalSessionEntry({ key: requestedKey });
@@ -734,32 +814,75 @@ export const sessionsHandlers: GatewayRequestHandlers = {
       return;
     }
 
-    const requestedKey = resolveRequestedSessionKey({
-      sessionIdentity: parsed.session_identity,
-      lookupKey: parsed.lookup_key,
-      lookupType: parsed.lookup_type,
-    });
-    const { target } = resolveGatewaySessionTargetFromKey(requestedKey);
-    if (normalizeAgentId(parsed.agent_id) !== normalizeAgentId(target.agentId)) {
-      respond(
-        false,
-        undefined,
-        errorShape(ErrorCodes.INVALID_REQUEST, `agent not found: ${parsed.agent_id}`),
-      );
-      return;
+    const runtimeSessionId =
+      parsed.lookup_type === "session_id"
+        ? parsed.lookup_key
+        : parsed.session_identity.session_key_source === "snapshot" &&
+            !isResolvableGatewaySessionStoreKey({
+              agentId: parsed.agent_id,
+              sessionId: parsed.session_identity.session_id,
+            })
+          ? parsed.session_identity.session_id
+          : null;
+    const runtimeSession = runtimeSessionId
+      ? findSessionEntryByRuntimeSessionId({
+          agentId: parsed.agent_id,
+          sessionId: runtimeSessionId,
+        })
+      : null;
+
+    let transcriptSessionId: string;
+    let transcriptStorePath: string;
+    let transcriptSessionFile: string | undefined;
+
+    if (runtimeSessionId) {
+      if (!runtimeSession) {
+        respond(
+          false,
+          undefined,
+          errorShape(ErrorCodes.INVALID_REQUEST, `session not found: ${runtimeSessionId}`),
+        );
+        return;
+      }
+      transcriptSessionId = runtimeSessionId;
+      transcriptStorePath = runtimeSession.storePath;
+      transcriptSessionFile = runtimeSession.sessionFile;
+    } else {
+      const requestedKey = resolveRequestedSessionKey({
+        agentId: parsed.agent_id,
+        sessionIdentity: parsed.session_identity,
+        lookupKey: parsed.lookup_key,
+        lookupType: parsed.lookup_type,
+      });
+      const { target } = resolveGatewaySessionTargetFromKey(requestedKey);
+      if (normalizeAgentId(parsed.agent_id) !== normalizeAgentId(target.agentId)) {
+        respond(
+          false,
+          undefined,
+          errorShape(ErrorCodes.INVALID_REQUEST, `agent not found: ${parsed.agent_id}`),
+        );
+        return;
+      }
+
+      const { entry } = loadSessionEntry(target.canonicalKey);
+      if (!entry?.sessionId) {
+        respond(
+          false,
+          undefined,
+          errorShape(ErrorCodes.INVALID_REQUEST, `session not found: ${target.canonicalKey}`),
+        );
+        return;
+      }
+      transcriptSessionId = entry.sessionId;
+      transcriptStorePath = target.storePath;
+      transcriptSessionFile = entry.sessionFile;
     }
 
-    const { entry } = loadSessionEntry(target.canonicalKey);
-    if (!entry?.sessionId) {
-      respond(
-        false,
-        undefined,
-        errorShape(ErrorCodes.INVALID_REQUEST, `session not found: ${target.canonicalKey}`),
-      );
-      return;
-    }
-
-    const mappedEntries = readSessionMessages(entry.sessionId, target.storePath, entry.sessionFile)
+    const mappedEntries = readSessionMessages(
+      transcriptSessionId,
+      transcriptStorePath,
+      transcriptSessionFile,
+    )
       .map(mapTranscriptMessageToEntry)
       .filter((value): value is TranscriptEntry => value !== null);
     const page = paginateTranscriptEntries({
