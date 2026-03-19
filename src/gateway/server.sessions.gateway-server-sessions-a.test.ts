@@ -1780,18 +1780,18 @@ describe("gateway server sessions", () => {
     ws.close();
   });
 
-  test("sessions.reset resolves via session_identity when present", async () => {
-    const { dir, storePathFor } = await createAgentScopedSessionStoreDir(["main"]);
-    const mainDir = path.join(dir, "main");
-    await fs.mkdir(mainDir, { recursive: true });
-    await writeSingleLineSession(mainDir, "sess-live-main", "hello identity");
+  test("sessions.reset resolves bare runtime ids via session_identity when present", async () => {
+    const { dir, storePathFor } = await createAgentScopedSessionStoreDir(["ops"]);
+    const opsDir = path.join(dir, "ops");
+    await fs.mkdir(opsDir, { recursive: true });
+    await writeSingleLineSession(opsDir, "sess-live-ops", "hello identity");
 
     await writeSessionStore({
-      storePath: storePathFor("main"),
-      agentId: "main",
+      storePath: storePathFor("ops"),
+      agentId: "ops",
       entries: {
         main: {
-          sessionId: "sess-live-main",
+          sessionId: "sess-live-ops",
           updatedAt: Date.now(),
         },
       },
@@ -1804,19 +1804,26 @@ describe("gateway server sessions", () => {
       key: string;
       entry: { sessionId: string };
     }>(ws, "sessions.reset", {
-      key: "agent:main:main",
-      agent_id: "main",
+      key: "sess-live-ops",
+      agent_id: "ops",
       session_identity: {
-        agent_id: "main",
-        session_id: "sess-live-main",
+        agent_id: "ops",
+        session_id: "sess-live-ops",
         session_key_source: "snapshot" as const,
       },
     });
 
     expect(reset.ok).toBe(true);
     expect(reset.payload?.reset_accepted).toBe(true);
-    expect(reset.payload?.key).toBe("agent:main:main");
-    expect(reset.payload?.entry.sessionId).not.toBe("sess-live-main");
+    expect(reset.payload?.key).toBe("agent:ops:main");
+    expect(reset.payload?.entry.sessionId).not.toBe("sess-live-ops");
+
+    const opsStore = JSON.parse(await fs.readFile(storePathFor("ops"), "utf-8")) as Record<
+      string,
+      { sessionId?: string }
+    >;
+    expect(opsStore["agent:ops:main"]?.sessionId).toBe(reset.payload?.entry.sessionId);
+    expect(opsStore["agent:ops:sess-live-ops"]).toBeUndefined();
 
     ws.close();
   });
@@ -2038,18 +2045,30 @@ describe("gateway server sessions", () => {
     ws.close();
   });
 
-  test("sessions.reset respects explicit key when session_identity is also present", async () => {
-    await seedActiveMainSession();
+  test("sessions.reset respects explicit non-main key when session_identity is also present", async () => {
+    const { storePath } = await createSessionStoreDir();
+    await writeSessionStore({
+      storePath,
+      entries: {
+        main: {
+          sessionId: "sess-live-main",
+          updatedAt: Date.now(),
+        },
+        "agent:main:subagent:worker": {
+          sessionId: "sess-subagent",
+          updatedAt: Date.now(),
+        },
+      },
+    });
 
     const { ws } = await openClient();
-    // Send both key and session_identity — key is a valid resolvable store key,
-    // so it should be used directly instead of identity-based resolution.
     const reset = await rpcReq<{
       reset_accepted: boolean;
       ok: boolean;
       key: string;
+      entry: { sessionId: string };
     }>(ws, "sessions.reset", {
-      key: "main",
+      key: "agent:main:subagent:worker",
       agent_id: "main",
       session_identity: {
         agent_id: "main",
@@ -2060,8 +2079,15 @@ describe("gateway server sessions", () => {
 
     expect(reset.ok).toBe(true);
     expect(reset.payload?.reset_accepted).toBe(true);
-    // Must target the key-resolved session, not identity-resolved
-    expect(reset.payload?.key).toBe("agent:main:main");
+    expect(reset.payload?.key).toBe("agent:main:subagent:worker");
+    expect(reset.payload?.entry.sessionId).not.toBe("sess-subagent");
+
+    const store = JSON.parse(await fs.readFile(storePath, "utf-8")) as Record<
+      string,
+      { sessionId?: string }
+    >;
+    expect(store["agent:main:subagent:worker"]?.sessionId).toBe(reset.payload?.entry.sessionId);
+    expect(store["agent:main:main"]?.sessionId).toBe("sess-live-main");
 
     ws.close();
   });
