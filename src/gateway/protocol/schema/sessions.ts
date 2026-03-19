@@ -85,6 +85,17 @@ export const SessionsPatchParamsSchema = Type.Object(
 export const SessionsResetParamsSchema = Type.Object(
   {
     key: NonEmptyString,
+    agent_id: Type.Optional(NonEmptyString),
+    session_identity: Type.Optional(
+      Type.Object(
+        {
+          agent_id: NonEmptyString,
+          session_id: NonEmptyString,
+          session_key_source: Type.Union([Type.Literal("snapshot"), Type.Literal("fallback")]),
+        },
+        { additionalProperties: false },
+      ),
+    ),
     reason: Type.Optional(Type.Union([Type.Literal("new"), Type.Literal("reset")])),
   },
   { additionalProperties: false },
