@@ -1862,6 +1862,32 @@ describe("gateway server sessions", () => {
     ws.close();
   });
 
+  test("sessions.reset falls back to legacy key when session_identity present but agent_id absent", async () => {
+    await seedActiveMainSession();
+
+    const { ws } = await openClient();
+    const reset = await rpcReq<{
+      reset_accepted: boolean;
+      ok: boolean;
+      key: string;
+      entry: { sessionId: string };
+    }>(ws, "sessions.reset", {
+      key: "main",
+      session_identity: {
+        agent_id: "main",
+        session_id: "sess-live-main",
+        session_key_source: "snapshot",
+      },
+      // No agent_id — should fall back to legacy key resolution
+    });
+
+    expect(reset.ok).toBe(true);
+    expect(reset.payload?.reset_accepted).toBe(true);
+    expect(reset.payload?.key).toBe("agent:main:main");
+
+    ws.close();
+  });
+
   test("bootstrap persists runtime session id in canonical store entry", async () => {
     const { storePath } = await createSessionStoreDir();
     const { ws } = await openClient({ scopes: ["operator.admin"] });

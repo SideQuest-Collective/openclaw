@@ -1000,16 +1000,11 @@ export const sessionsHandlers: GatewayRequestHandlers = {
     // Resolve the target session key — prefer session_identity when present
     let resetKey: string;
     const sessionIdentity = parseGatewaySessionIdentity(p.session_identity);
-    if (sessionIdentity && p.agent_id) {
-      const agentId = typeof p.agent_id === "string" ? p.agent_id.trim() : "";
-      if (agentId) {
-        resetKey = resolveRequestedSessionKey({
-          agentId,
-          sessionIdentity,
-        });
-      } else {
-        resetKey = rawKey;
-      }
+    if (sessionIdentity && typeof p.agent_id === "string" && p.agent_id.trim()) {
+      resetKey = resolveRequestedSessionKey({
+        agentId: p.agent_id.trim(),
+        sessionIdentity,
+      });
     } else {
       resetKey = rawKey;
     }
