@@ -571,7 +571,10 @@ function findSessionEntryByRuntimeSessionId(params: { agentId: string; sessionId
   };
 }
 
-async function ensureCanonicalSessionEntry(params: { key: string }): Promise<{
+async function ensureCanonicalSessionEntry(params: {
+  key: string;
+  runtimeSessionId?: string;
+}): Promise<{
   cfg: ReturnType<typeof loadConfig>;
   target: ReturnType<typeof resolveGatewaySessionStoreTarget>;
   storePath: string;
@@ -591,6 +594,7 @@ async function ensureCanonicalSessionEntry(params: { key: string }): Promise<{
     });
     const merged = mergeSessionEntry(store[resolved.canonicalKey], {
       updatedAt: Date.now(),
+      ...(params.runtimeSessionId ? { sessionId: params.runtimeSessionId } : {}),
     });
     store[resolved.canonicalKey] = merged;
     return merged;
@@ -768,7 +772,16 @@ export const sessionsHandlers: GatewayRequestHandlers = {
       agentId: parsed.agent_id,
       sessionIdentity: parsed.session_identity,
     });
-    const { target } = await ensureCanonicalSessionEntry({ key: requestedKey });
+    // If the identity is a snapshot with a real runtime id, persist it
+    const runtimeSessionId =
+      parsed.session_identity.session_key_source === "snapshot" &&
+      !isResolvableGatewaySessionStoreKey({
+        agentId: parsed.agent_id,
+        sessionId: parsed.session_identity.session_id,
+      })
+        ? parsed.session_identity.session_id
+        : undefined;
+    const { target } = await ensureCanonicalSessionEntry({ key: requestedKey, runtimeSessionId });
     const resolvedIdentity = buildResolvedSessionIdentity({
       requested: parsed.session_identity,
       canonicalKey: target.canonicalKey,
@@ -792,7 +805,16 @@ export const sessionsHandlers: GatewayRequestHandlers = {
       agentId: parsed.agent_id,
       sessionIdentity: parsed.session_identity,
     });
-    const { target } = await ensureCanonicalSessionEntry({ key: requestedKey });
+    // If the identity is a snapshot with a real runtime id, persist it
+    const runtimeSessionId =
+      parsed.session_identity.session_key_source === "snapshot" &&
+      !isResolvableGatewaySessionStoreKey({
+        agentId: parsed.agent_id,
+        sessionId: parsed.session_identity.session_id,
+      })
+        ? parsed.session_identity.session_id
+        : undefined;
+    const { target } = await ensureCanonicalSessionEntry({ key: requestedKey, runtimeSessionId });
     const resolvedIdentity = buildResolvedSessionIdentity({
       requested: parsed.session_identity,
       canonicalKey: target.canonicalKey,
@@ -840,11 +862,10 @@ export const sessionsHandlers: GatewayRequestHandlers = {
 
     if (runtimeSessionId) {
       if (!runtimeSession) {
-        respond(
-          false,
-          undefined,
-          errorShape(ErrorCodes.INVALID_REQUEST, `session not found: ${runtimeSessionId}`),
-        );
+        // No transcript file and no store entry for this runtime id.
+        // This is normal for freshly-bootstrapped idle sessions.
+        // Return an empty transcript instead of an error.
+        respond(true, { entries: [], cursor: null, has_more: false }, undefined);
         return;
       }
       transcriptSessionId = runtimeSessionId;
@@ -971,19 +992,36 @@ export const sessionsHandlers: GatewayRequestHandlers = {
       return;
     }
     const p = params;
-    const key = requireSessionKey(p.key, respond);
-    if (!key) {
+    const rawKey = requireSessionKey(p.key, respond);
+    if (!rawKey) {
       return;
     }
 
-    const { cfg, target, storePath } = resolveGatewaySessionTargetFromKey(key);
-    const { entry, legacyKey, canonicalKey } = loadSessionEntry(key);
+    // Resolve the target session key — prefer session_identity when present
+    let resetKey: string;
+    const sessionIdentity = parseGatewaySessionIdentity(p.session_identity);
+    if (sessionIdentity && p.agent_id) {
+      const agentId = typeof p.agent_id === "string" ? p.agent_id.trim() : "";
+      if (agentId) {
+        resetKey = resolveRequestedSessionKey({
+          agentId,
+          sessionIdentity,
+        });
+      } else {
+        resetKey = rawKey;
+      }
+    } else {
+      resetKey = rawKey;
+    }
+
+    const { cfg, target, storePath } = resolveGatewaySessionTargetFromKey(resetKey);
+    const { entry, legacyKey, canonicalKey } = loadSessionEntry(resetKey);
     const hadExistingEntry = Boolean(entry);
     const commandReason = p.reason === "new" ? "new" : "reset";
     const hookEvent = createInternalHookEvent(
       "command",
       commandReason,
-      target.canonicalKey ?? key,
+      target.canonicalKey ?? resetKey,
       {
         sessionEntry: entry,
         previousSessionEntry: entry,
@@ -994,7 +1032,7 @@ export const sessionsHandlers: GatewayRequestHandlers = {
     await triggerInternalHook(hookEvent);
     const mutationCleanupError = await cleanupSessionBeforeMutation({
       cfg,
-      key,
+      key: resetKey,
       target,
       entry,
       legacyKey,
@@ -1008,7 +1046,7 @@ export const sessionsHandlers: GatewayRequestHandlers = {
     let oldSessionId: string | undefined;
     let oldSessionFile: string | undefined;
     const next = await updateSessionStore(storePath, (store) => {
-      const { primaryKey } = migrateAndPruneSessionStoreKey({ cfg, key, store });
+      const { primaryKey } = migrateAndPruneSessionStoreKey({ cfg, key: resetKey, store });
       const entry = store[primaryKey];
       const parsed = parseAgentSessionKey(primaryKey);
       const sessionAgentId = normalizeAgentId(parsed?.agentId ?? resolveDefaultAgentId(cfg));
@@ -1053,11 +1091,15 @@ export const sessionsHandlers: GatewayRequestHandlers = {
     });
     if (hadExistingEntry) {
       await emitSessionUnboundLifecycleEvent({
-        targetSessionKey: target.canonicalKey ?? key,
+        targetSessionKey: target.canonicalKey ?? resetKey,
         reason: "session-reset",
       });
     }
-    respond(true, { ok: true, key: target.canonicalKey, entry: next }, undefined);
+    respond(
+      true,
+      { reset_accepted: true, ok: true, key: target.canonicalKey, entry: next },
+      undefined,
+    );
   },
   "sessions.delete": async ({ params, respond, client, isWebchatConnect }) => {
     if (!assertValidParams(params, validateSessionsDeleteParams, "sessions.delete", respond)) {

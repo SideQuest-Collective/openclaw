@@ -1779,4 +1779,86 @@ describe("gateway server sessions", () => {
 
     ws.close();
   });
+
+  test("sessions.reset resolves via session_identity when present", async () => {
+    const { dir, storePathFor } = await createAgentScopedSessionStoreDir(["main"]);
+    const mainDir = path.join(dir, "main");
+    await fs.mkdir(mainDir, { recursive: true });
+    await writeSingleLineSession(mainDir, "sess-live-main", "hello identity");
+
+    await writeSessionStore({
+      storePath: storePathFor("main"),
+      agentId: "main",
+      entries: {
+        main: {
+          sessionId: "sess-live-main",
+          updatedAt: Date.now(),
+        },
+      },
+    });
+
+    const { ws } = await openClient();
+    const reset = await rpcReq<{
+      reset_accepted: boolean;
+      ok: boolean;
+      key: string;
+      entry: { sessionId: string };
+    }>(ws, "sessions.reset", {
+      key: "agent:main:main",
+      agent_id: "main",
+      session_identity: {
+        agent_id: "main",
+        session_id: "sess-live-main",
+        session_key_source: "snapshot" as const,
+      },
+    });
+
+    expect(reset.ok).toBe(true);
+    expect(reset.payload?.reset_accepted).toBe(true);
+    expect(reset.payload?.key).toBe("agent:main:main");
+    expect(reset.payload?.entry.sessionId).not.toBe("sess-live-main");
+
+    ws.close();
+  });
+
+  test("sessions.reset falls back to legacy key when no session_identity", async () => {
+    await seedActiveMainSession();
+
+    const { ws } = await openClient();
+    const reset = await rpcReq<{
+      reset_accepted: boolean;
+      ok: boolean;
+      key: string;
+      entry: { sessionId: string };
+    }>(ws, "sessions.reset", {
+      key: "main",
+    });
+
+    expect(reset.ok).toBe(true);
+    expect(reset.payload?.reset_accepted).toBe(true);
+    expect(reset.payload?.key).toBe("agent:main:main");
+    expect(reset.payload?.entry.sessionId).toBeDefined();
+
+    ws.close();
+  });
+
+  test("sessions.reset response includes reset_accepted field", async () => {
+    await seedActiveMainSession();
+
+    const { ws } = await openClient();
+    const reset = await rpcReq<{
+      reset_accepted: boolean;
+      ok: boolean;
+      key: string;
+      entry: { sessionId: string };
+    }>(ws, "sessions.reset", {
+      key: "main",
+    });
+
+    expect(reset.ok).toBe(true);
+    expect(reset.payload?.reset_accepted).toBe(true);
+    expect(typeof reset.payload?.reset_accepted).toBe("boolean");
+
+    ws.close();
+  });
 });
