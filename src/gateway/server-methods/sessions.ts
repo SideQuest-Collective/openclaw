@@ -592,9 +592,14 @@ async function ensureCanonicalSessionEntry(params: {
       canonicalKey: resolved.canonicalKey,
       candidates: resolved.storeKeys,
     });
-    const merged = mergeSessionEntry(store[resolved.canonicalKey], {
+    const existing = store[resolved.canonicalKey];
+    // Only seed the runtime session id when the canonical entry does not
+    // already carry one. Overwriting unconditionally would let a stale
+    // client snapshot rewind the binding after a reset or concurrent tab.
+    const shouldSeedSessionId = params.runtimeSessionId && (!existing || !existing.sessionId);
+    const merged = mergeSessionEntry(existing, {
       updatedAt: Date.now(),
-      ...(params.runtimeSessionId ? { sessionId: params.runtimeSessionId } : {}),
+      ...(shouldSeedSessionId ? { sessionId: params.runtimeSessionId } : {}),
     });
     store[resolved.canonicalKey] = merged;
     return merged;
@@ -862,9 +867,18 @@ export const sessionsHandlers: GatewayRequestHandlers = {
 
     if (runtimeSessionId) {
       if (!runtimeSession) {
-        // No transcript file and no store entry for this runtime id.
-        // This is normal for freshly-bootstrapped idle sessions.
-        // Return an empty transcript instead of an error.
+        // For direct session_id lookups, a missing session is a real error —
+        // the caller asked for a specific historical session that doesn't exist.
+        // Only return an empty transcript for snapshot/current-session reads
+        // where an idle post-bootstrap state is expected.
+        if (parsed.lookup_type === "session_id") {
+          respond(
+            false,
+            undefined,
+            errorShape(ErrorCodes.INVALID_REQUEST, `session not found: ${runtimeSessionId}`),
+          );
+          return;
+        }
         respond(true, { entries: [], cursor: null, has_more: false }, undefined);
         return;
       }
@@ -997,10 +1011,24 @@ export const sessionsHandlers: GatewayRequestHandlers = {
       return;
     }
 
-    // Resolve the target session key — prefer session_identity when present
+    // Resolve the target session key.
+    // When p.key is already a resolvable store key (canonical, main, global,
+    // etc.), respect it directly — it may target a channel/subagent/thread
+    // session that resolveRequestedSessionKey would flatten to :main.
+    // Only use session_identity to translate a bare runtime id (e.g.,
+    // "sess-live-main") that p.key carries when Skynet forwards
+    // key = session_identity.session_id.
     let resetKey: string;
     const sessionIdentity = parseGatewaySessionIdentity(p.session_identity);
-    if (sessionIdentity && typeof p.agent_id === "string" && p.agent_id.trim()) {
+    if (
+      sessionIdentity &&
+      typeof p.agent_id === "string" &&
+      p.agent_id.trim() &&
+      !isResolvableGatewaySessionStoreKey({
+        agentId: p.agent_id.trim(),
+        sessionId: rawKey,
+      })
+    ) {
       resetKey = resolveRequestedSessionKey({
         agentId: p.agent_id.trim(),
         sessionIdentity,

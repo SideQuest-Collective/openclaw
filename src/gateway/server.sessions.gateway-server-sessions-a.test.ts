@@ -1998,4 +1998,105 @@ describe("gateway server sessions", () => {
 
     ws.close();
   });
+
+  test("re-bootstrap does not overwrite an existing canonical session id", async () => {
+    const { storePath } = await createSessionStoreDir();
+    const { ws } = await openClient({ scopes: ["operator.admin"] });
+
+    // First bootstrap seeds the runtime id
+    await rpcReq(ws, "sessions.bootstrap", {
+      agent_id: "main",
+      session_identity: {
+        agent_id: "main",
+        session_id: "sess-first",
+        session_key_source: "snapshot",
+      },
+    });
+
+    const storeAfterFirst = JSON.parse(await fs.readFile(storePath, "utf-8")) as Record<
+      string,
+      { sessionId?: string }
+    >;
+    expect(storeAfterFirst["agent:main:main"]?.sessionId).toBe("sess-first");
+
+    // Second bootstrap from a stale client must NOT rewind the id
+    await rpcReq(ws, "sessions.bootstrap", {
+      agent_id: "main",
+      session_identity: {
+        agent_id: "main",
+        session_id: "sess-stale",
+        session_key_source: "snapshot",
+      },
+    });
+
+    const storeAfterSecond = JSON.parse(await fs.readFile(storePath, "utf-8")) as Record<
+      string,
+      { sessionId?: string }
+    >;
+    expect(storeAfterSecond["agent:main:main"]?.sessionId).toBe("sess-first");
+
+    ws.close();
+  });
+
+  test("sessions.reset respects explicit key when session_identity is also present", async () => {
+    await seedActiveMainSession();
+
+    const { ws } = await openClient();
+    // Send both key and session_identity — key is a valid resolvable store key,
+    // so it should be used directly instead of identity-based resolution.
+    const reset = await rpcReq<{
+      reset_accepted: boolean;
+      ok: boolean;
+      key: string;
+    }>(ws, "sessions.reset", {
+      key: "main",
+      agent_id: "main",
+      session_identity: {
+        agent_id: "main",
+        session_id: "sess-live-main",
+        session_key_source: "snapshot",
+      },
+    });
+
+    expect(reset.ok).toBe(true);
+    expect(reset.payload?.reset_accepted).toBe(true);
+    // Must target the key-resolved session, not identity-resolved
+    expect(reset.payload?.key).toBe("agent:main:main");
+
+    ws.close();
+  });
+
+  test("transcript.read returns error for explicit session_id lookup of missing session", async () => {
+    await createSessionStoreDir();
+    const { ws } = await openClient({ scopes: ["operator.admin"] });
+
+    // Bootstrap so the store exists
+    await rpcReq(ws, "sessions.bootstrap", {
+      agent_id: "main",
+      session_identity: {
+        agent_id: "main",
+        session_id: "sess-live-main",
+        session_key_source: "snapshot",
+      },
+    });
+
+    // Direct session_id lookup for a non-existent session must error
+    const transcript = await rpcReq<unknown>(ws, "transcript.read", {
+      agent_id: "main",
+      session_identity: {
+        agent_id: "main",
+        session_id: "sess-live-main",
+        session_key_source: "snapshot",
+      },
+      lookup_key: "sess-does-not-exist",
+      lookup_type: "session_id",
+      limit: 10,
+    });
+
+    expect(transcript.ok).toBe(false);
+    expect(transcript.error?.code).toBe("INVALID_REQUEST");
+    expect(transcript.error?.message).toMatch(/session not found/i);
+
+    ws.close();
+  });
 });
