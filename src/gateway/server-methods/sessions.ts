@@ -571,7 +571,10 @@ function findSessionEntryByRuntimeSessionId(params: { agentId: string; sessionId
   };
 }
 
-async function ensureCanonicalSessionEntry(params: { key: string }): Promise<{
+async function ensureCanonicalSessionEntry(params: {
+  key: string;
+  runtimeSessionId?: string;
+}): Promise<{
   cfg: ReturnType<typeof loadConfig>;
   target: ReturnType<typeof resolveGatewaySessionStoreTarget>;
   storePath: string;
@@ -589,8 +592,14 @@ async function ensureCanonicalSessionEntry(params: { key: string }): Promise<{
       canonicalKey: resolved.canonicalKey,
       candidates: resolved.storeKeys,
     });
-    const merged = mergeSessionEntry(store[resolved.canonicalKey], {
+    const existing = store[resolved.canonicalKey];
+    // Only seed the runtime session id when the canonical entry does not
+    // already carry one. Overwriting unconditionally would let a stale
+    // client snapshot rewind the binding after a reset or concurrent tab.
+    const shouldSeedSessionId = params.runtimeSessionId && (!existing || !existing.sessionId);
+    const merged = mergeSessionEntry(existing, {
       updatedAt: Date.now(),
+      ...(shouldSeedSessionId ? { sessionId: params.runtimeSessionId } : {}),
     });
     store[resolved.canonicalKey] = merged;
     return merged;
@@ -768,7 +777,16 @@ export const sessionsHandlers: GatewayRequestHandlers = {
       agentId: parsed.agent_id,
       sessionIdentity: parsed.session_identity,
     });
-    const { target } = await ensureCanonicalSessionEntry({ key: requestedKey });
+    // If the identity is a snapshot with a real runtime id, persist it
+    const runtimeSessionId =
+      parsed.session_identity.session_key_source === "snapshot" &&
+      !isResolvableGatewaySessionStoreKey({
+        agentId: parsed.agent_id,
+        sessionId: parsed.session_identity.session_id,
+      })
+        ? parsed.session_identity.session_id
+        : undefined;
+    const { target } = await ensureCanonicalSessionEntry({ key: requestedKey, runtimeSessionId });
     const resolvedIdentity = buildResolvedSessionIdentity({
       requested: parsed.session_identity,
       canonicalKey: target.canonicalKey,
@@ -792,7 +810,16 @@ export const sessionsHandlers: GatewayRequestHandlers = {
       agentId: parsed.agent_id,
       sessionIdentity: parsed.session_identity,
     });
-    const { target } = await ensureCanonicalSessionEntry({ key: requestedKey });
+    // If the identity is a snapshot with a real runtime id, persist it
+    const runtimeSessionId =
+      parsed.session_identity.session_key_source === "snapshot" &&
+      !isResolvableGatewaySessionStoreKey({
+        agentId: parsed.agent_id,
+        sessionId: parsed.session_identity.session_id,
+      })
+        ? parsed.session_identity.session_id
+        : undefined;
+    const { target } = await ensureCanonicalSessionEntry({ key: requestedKey, runtimeSessionId });
     const resolvedIdentity = buildResolvedSessionIdentity({
       requested: parsed.session_identity,
       canonicalKey: target.canonicalKey,
@@ -840,11 +867,19 @@ export const sessionsHandlers: GatewayRequestHandlers = {
 
     if (runtimeSessionId) {
       if (!runtimeSession) {
-        respond(
-          false,
-          undefined,
-          errorShape(ErrorCodes.INVALID_REQUEST, `session not found: ${runtimeSessionId}`),
-        );
+        // For direct session_id lookups, a missing session is a real error —
+        // the caller asked for a specific historical session that doesn't exist.
+        // Only return an empty transcript for snapshot/current-session reads
+        // where an idle post-bootstrap state is expected.
+        if (parsed.lookup_type === "session_id") {
+          respond(
+            false,
+            undefined,
+            errorShape(ErrorCodes.INVALID_REQUEST, `session not found: ${runtimeSessionId}`),
+          );
+          return;
+        }
+        respond(true, { entries: [], cursor: null, has_more: false }, undefined);
         return;
       }
       transcriptSessionId = runtimeSessionId;
@@ -971,19 +1006,45 @@ export const sessionsHandlers: GatewayRequestHandlers = {
       return;
     }
     const p = params;
-    const key = requireSessionKey(p.key, respond);
-    if (!key) {
+    const rawKey = requireSessionKey(p.key, respond);
+    if (!rawKey) {
       return;
     }
 
-    const { cfg, target, storePath } = resolveGatewaySessionTargetFromKey(key);
-    const { entry, legacyKey, canonicalKey } = loadSessionEntry(key);
+    // Resolve the target session key.
+    // When p.key is already a resolvable store key (canonical, main, global,
+    // etc.), respect it directly — it may target a channel/subagent/thread
+    // session that resolveRequestedSessionKey would flatten to :main.
+    // Only use session_identity to translate a bare runtime id (e.g.,
+    // "sess-live-main") that p.key carries when Skynet forwards
+    // key = session_identity.session_id.
+    let resetKey: string;
+    const sessionIdentity = parseGatewaySessionIdentity(p.session_identity);
+    if (
+      sessionIdentity &&
+      typeof p.agent_id === "string" &&
+      p.agent_id.trim() &&
+      !isResolvableGatewaySessionStoreKey({
+        agentId: p.agent_id.trim(),
+        sessionId: rawKey,
+      })
+    ) {
+      resetKey = resolveRequestedSessionKey({
+        agentId: p.agent_id.trim(),
+        sessionIdentity,
+      });
+    } else {
+      resetKey = rawKey;
+    }
+
+    const { cfg, target, storePath } = resolveGatewaySessionTargetFromKey(resetKey);
+    const { entry, legacyKey, canonicalKey } = loadSessionEntry(resetKey);
     const hadExistingEntry = Boolean(entry);
     const commandReason = p.reason === "new" ? "new" : "reset";
     const hookEvent = createInternalHookEvent(
       "command",
       commandReason,
-      target.canonicalKey ?? key,
+      target.canonicalKey ?? resetKey,
       {
         sessionEntry: entry,
         previousSessionEntry: entry,
@@ -994,7 +1055,7 @@ export const sessionsHandlers: GatewayRequestHandlers = {
     await triggerInternalHook(hookEvent);
     const mutationCleanupError = await cleanupSessionBeforeMutation({
       cfg,
-      key,
+      key: resetKey,
       target,
       entry,
       legacyKey,
@@ -1008,7 +1069,7 @@ export const sessionsHandlers: GatewayRequestHandlers = {
     let oldSessionId: string | undefined;
     let oldSessionFile: string | undefined;
     const next = await updateSessionStore(storePath, (store) => {
-      const { primaryKey } = migrateAndPruneSessionStoreKey({ cfg, key, store });
+      const { primaryKey } = migrateAndPruneSessionStoreKey({ cfg, key: resetKey, store });
       const entry = store[primaryKey];
       const parsed = parseAgentSessionKey(primaryKey);
       const sessionAgentId = normalizeAgentId(parsed?.agentId ?? resolveDefaultAgentId(cfg));
@@ -1053,11 +1114,15 @@ export const sessionsHandlers: GatewayRequestHandlers = {
     });
     if (hadExistingEntry) {
       await emitSessionUnboundLifecycleEvent({
-        targetSessionKey: target.canonicalKey ?? key,
+        targetSessionKey: target.canonicalKey ?? resetKey,
         reason: "session-reset",
       });
     }
-    respond(true, { ok: true, key: target.canonicalKey, entry: next }, undefined);
+    respond(
+      true,
+      { reset_accepted: true, ok: true, key: target.canonicalKey, entry: next },
+      undefined,
+    );
   },
   "sessions.delete": async ({ params, respond, client, isWebchatConnect }) => {
     if (!assertValidParams(params, validateSessionsDeleteParams, "sessions.delete", respond)) {
