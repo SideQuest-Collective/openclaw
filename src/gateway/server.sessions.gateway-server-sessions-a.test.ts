@@ -1641,6 +1641,87 @@ describe("gateway server sessions", () => {
     ws.close();
   });
 
+  test("transcript.read rejects invalid cursor values", async () => {
+    const { dir } = await createSessionStoreDir();
+    const transcriptPath = path.join(dir, "sess-cursor-test.jsonl");
+    const lines = [
+      JSON.stringify({
+        message: {
+          role: "user",
+          content: [{ type: "text", text: "turn one" }],
+          timestamp: "2026-03-19T10:00:00.000Z",
+        },
+      }),
+      JSON.stringify({
+        message: {
+          role: "assistant",
+          content: [{ type: "text", text: "reply one" }],
+          timestamp: "2026-03-19T10:01:00.000Z",
+        },
+      }),
+    ];
+    await fs.writeFile(transcriptPath, `${lines.join("\n")}\n`, "utf-8");
+    await writeSessionStore({
+      entries: {
+        main: {
+          sessionId: "sess-cursor-test",
+          updatedAt: Date.now(),
+        },
+      },
+    });
+
+    const { ws } = await openClient({ scopes: ["operator.admin"] });
+    const baseParams = {
+      agent_id: "main",
+      session_identity: {
+        agent_id: "main",
+        session_id: "agent:main:main",
+        session_key_source: "snapshot",
+      },
+      lookup_key: "main",
+      lookup_type: "context_id",
+      limit: 10,
+    };
+
+    // Non-numeric cursor
+    const nonNumeric = await rpcReq<unknown>(ws, "transcript.read", {
+      ...baseParams,
+      cursor: "abc",
+    });
+    expect(nonNumeric.ok).toBe(false);
+    expect(nonNumeric.error?.code).toBe("INVALID_REQUEST");
+    expect(nonNumeric.error?.message).toMatch(/invalid cursor/i);
+
+    // Negative cursor
+    const negative = await rpcReq<unknown>(ws, "transcript.read", {
+      ...baseParams,
+      cursor: "-1",
+    });
+    expect(negative.ok).toBe(false);
+    expect(negative.error?.code).toBe("INVALID_REQUEST");
+    expect(negative.error?.message).toMatch(/invalid cursor/i);
+
+    // Zero cursor
+    const zero = await rpcReq<unknown>(ws, "transcript.read", {
+      ...baseParams,
+      cursor: "0",
+    });
+    expect(zero.ok).toBe(false);
+    expect(zero.error?.code).toBe("INVALID_REQUEST");
+    expect(zero.error?.message).toMatch(/invalid cursor/i);
+
+    // Cursor exceeding total entries
+    const exceeding = await rpcReq<unknown>(ws, "transcript.read", {
+      ...baseParams,
+      cursor: "999",
+    });
+    expect(exceeding.ok).toBe(false);
+    expect(exceeding.error?.code).toBe("INVALID_REQUEST");
+    expect(exceeding.error?.message).toMatch(/invalid cursor/i);
+
+    ws.close();
+  });
+
   test("transcript.read resolves direct session_id lookups for non-default agents", async () => {
     const { dir, storePathFor } = await createAgentScopedSessionStoreDir(["ops"]);
     const historicalSessionId = "sess-hist-ops";

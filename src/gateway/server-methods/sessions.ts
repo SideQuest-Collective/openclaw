@@ -540,12 +540,13 @@ function findSessionEntryByRuntimeSessionId(params: { agentId: string; sessionId
     scanLegacyKeys: false,
   });
   const store = loadSessionStore(sessionTarget.storePath);
-  const match = Object.entries(store).find(
-    ([key, entry]) =>
-      entry?.sessionId === params.sessionId &&
-      (!parseAgentSessionKey(key) ||
-        normalizeAgentId(parseAgentSessionKey(key)?.agentId) === normalizeAgentId(params.agentId)),
-  );
+  const match = Object.entries(store).find(([key, entry]) => {
+    if (entry?.sessionId !== params.sessionId) {
+      return false;
+    }
+    const parsed = parseAgentSessionKey(key);
+    return !parsed || normalizeAgentId(parsed.agentId) === normalizeAgentId(params.agentId);
+  });
   const canonicalKey = match
     ? resolveGatewaySessionStoreTarget({
         cfg,
@@ -597,6 +598,8 @@ async function ensureCanonicalSessionEntry(params: { key: string }): Promise<{
   return { cfg, target, storePath, entry };
 }
 
+// Extracts text from transcript content. Only text-type content blocks are
+// included; non-text blocks (tool_use, image, etc.) are silently skipped.
 function extractTranscriptText(value: unknown): string | undefined {
   if (typeof value === "string") {
     const trimmed = value.trim();
@@ -878,6 +881,7 @@ export const sessionsHandlers: GatewayRequestHandlers = {
       transcriptSessionFile = entry.sessionFile;
     }
 
+    // Default limit: 50 entries per page, clamped to [1, 200] when provided.
     const mappedEntries = readSessionMessages(
       transcriptSessionId,
       transcriptStorePath,
