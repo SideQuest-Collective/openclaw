@@ -1302,4 +1302,184 @@ describe("gateway server sessions", () => {
 
     ws.close();
   });
+
+  test("sessions.bootstrap creates or touches the canonical session entry and preserves snapshot identity", async () => {
+    const { storePath } = await createSessionStoreDir();
+    const { ws } = await openClient({ scopes: ["operator.admin"] });
+
+    const bootstrap = await rpcReq<{
+      session_identity?: {
+        agent_id?: string;
+        session_id?: string;
+        session_key_source?: string;
+      };
+      bootstrap_complete?: boolean;
+    }>(ws, "sessions.bootstrap", {
+      agent_id: "main",
+      session_identity: {
+        agent_id: "main",
+        session_id: "agent:main:main",
+        session_key_source: "snapshot",
+      },
+    });
+
+    expect(bootstrap.ok).toBe(true);
+    expect(bootstrap.payload?.bootstrap_complete).toBe(true);
+    expect(bootstrap.payload?.session_identity).toEqual({
+      agent_id: "main",
+      session_id: "agent:main:main",
+      session_key_source: "snapshot",
+    });
+
+    const store = JSON.parse(await fs.readFile(storePath, "utf-8")) as Record<
+      string,
+      { sessionId?: string }
+    >;
+    expect(typeof store["agent:main:main"]?.sessionId).toBe("string");
+
+    ws.close();
+  });
+
+  test("presence.init acknowledges the canonical session identity without recreating the legacy roster shim", async () => {
+    await createSessionStoreDir();
+    const { ws } = await openClient({ scopes: ["operator.admin"] });
+
+    const presence = await rpcReq<{
+      peers_discovered?: number;
+      session_identity?: {
+        agent_id?: string;
+        session_id?: string;
+        session_key_source?: string;
+      };
+    }>(ws, "presence.init", {
+      agent_id: "main",
+      session_identity: {
+        agent_id: "main",
+        session_id: "agent:main:main",
+        session_key_source: "fallback",
+      },
+    });
+
+    expect(presence.ok).toBe(true);
+    expect(presence.payload?.peers_discovered).toBe(0);
+    expect(presence.payload?.session_identity).toEqual({
+      agent_id: "main",
+      session_id: "agent:main:main",
+      session_key_source: "fallback",
+    });
+
+    ws.close();
+  });
+
+  test("transcript.read paginates the current session transcript using cursor offsets", async () => {
+    const { dir } = await createSessionStoreDir();
+    const transcriptPath = path.join(dir, "sess-main.jsonl");
+    const lines = [
+      JSON.stringify({
+        message: {
+          role: "user",
+          content: [{ type: "text", text: "first user turn" }],
+          timestamp: "2026-03-19T10:00:00.000Z",
+        },
+      }),
+      JSON.stringify({
+        message: {
+          role: "assistant",
+          content: [{ type: "text", text: "first agent reply" }],
+          timestamp: "2026-03-19T10:01:00.000Z",
+        },
+      }),
+      JSON.stringify({
+        message: {
+          role: "user",
+          content: [{ type: "text", text: "second user turn" }],
+          timestamp: "2026-03-19T10:02:00.000Z",
+        },
+      }),
+      JSON.stringify({
+        message: {
+          role: "assistant",
+          content: [{ type: "text", text: "second agent reply" }],
+          timestamp: "2026-03-19T10:03:00.000Z",
+        },
+      }),
+    ];
+    await fs.writeFile(transcriptPath, `${lines.join("\n")}\n`, "utf-8");
+    await writeSessionStore({
+      entries: {
+        main: {
+          sessionId: "sess-main",
+          updatedAt: Date.now(),
+        },
+      },
+    });
+
+    const { ws } = await openClient({ scopes: ["operator.admin"] });
+    const latestPage = await rpcReq<{
+      entries?: Array<{ role?: string; text?: string; timestamp?: string }>;
+      cursor?: string | null;
+      has_more?: boolean;
+    }>(ws, "transcript.read", {
+      agent_id: "main",
+      session_identity: {
+        agent_id: "main",
+        session_id: "agent:main:main",
+        session_key_source: "snapshot",
+      },
+      lookup_key: "main",
+      lookup_type: "context_id",
+      limit: 2,
+    });
+
+    expect(latestPage.ok).toBe(true);
+    expect(latestPage.payload?.entries).toEqual([
+      {
+        role: "user",
+        text: "second user turn",
+        timestamp: "2026-03-19T10:02:00.000Z",
+      },
+      {
+        role: "agent",
+        text: "second agent reply",
+        timestamp: "2026-03-19T10:03:00.000Z",
+      },
+    ]);
+    expect(latestPage.payload?.has_more).toBe(true);
+    expect(latestPage.payload?.cursor).toBe("2");
+
+    const olderPage = await rpcReq<{
+      entries?: Array<{ role?: string; text?: string; timestamp?: string }>;
+      cursor?: string | null;
+      has_more?: boolean;
+    }>(ws, "transcript.read", {
+      agent_id: "main",
+      session_identity: {
+        agent_id: "main",
+        session_id: "agent:main:main",
+        session_key_source: "snapshot",
+      },
+      lookup_key: "main",
+      lookup_type: "context_id",
+      limit: 2,
+      cursor: latestPage.payload?.cursor,
+    });
+
+    expect(olderPage.ok).toBe(true);
+    expect(olderPage.payload?.entries).toEqual([
+      {
+        role: "user",
+        text: "first user turn",
+        timestamp: "2026-03-19T10:00:00.000Z",
+      },
+      {
+        role: "agent",
+        text: "first agent reply",
+        timestamp: "2026-03-19T10:01:00.000Z",
+      },
+    ]);
+    expect(olderPage.payload?.has_more).toBe(false);
+    expect(olderPage.payload?.cursor).toBeNull();
+
+    ws.close();
+  });
 });
