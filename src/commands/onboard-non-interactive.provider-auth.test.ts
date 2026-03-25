@@ -483,24 +483,6 @@ describe("onboard (non-interactive): provider auth", () => {
     });
   });
 
-  it("stores LiteLLM API key and sets default model", async () => {
-    await withOnboardEnv("openclaw-onboard-litellm-", async (env) => {
-      const cfg = await runOnboardingAndReadConfig(env, {
-        authChoice: "litellm-api-key",
-        litellmApiKey: "litellm-test-key",
-      });
-
-      expect(cfg.auth?.profiles?.["litellm:default"]?.provider).toBe("litellm");
-      expect(cfg.auth?.profiles?.["litellm:default"]?.mode).toBe("api_key");
-      expect(cfg.agents?.defaults?.model?.primary).toBe("litellm/claude-opus-4-6");
-      await expectApiKeyProfile({
-        profileId: "litellm:default",
-        provider: "litellm",
-        key: "litellm-test-key",
-      });
-    });
-  });
-
   it.each([
     {
       name: "stores Cloudflare AI Gateway API key and metadata",

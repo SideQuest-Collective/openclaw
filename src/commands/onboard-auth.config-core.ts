@@ -47,12 +47,6 @@ export {
   applyVercelAiGatewayConfig,
   applyVercelAiGatewayProviderConfig,
 } from "./onboard-auth.config-gateways.js";
-export {
-  applyLitellmConfig,
-  applyLitellmProviderConfig,
-  LITELLM_BASE_URL,
-  LITELLM_DEFAULT_MODEL_ID,
-} from "./onboard-auth.config-litellm.js";
 import {
   applyAgentDefaultModelPrimary,
   applyOnboardAuthAgentModelsAndProviders,

@@ -1,4 +1,3 @@
-import { ensureAuthProfileStore, resolveAuthProfileOrder } from "../agents/auth-profiles.js";
 import type { SecretInput } from "../config/types.secrets.js";
 import { normalizeApiKeyInput, validateApiKeyInput } from "./auth-choice.api-key.js";
 import {
@@ -26,8 +25,6 @@ import {
   applyQianfanProviderConfig,
   applyKimiCodeConfig,
   applyKimiCodeProviderConfig,
-  applyLitellmConfig,
-  applyLitellmProviderConfig,
   applyMistralConfig,
   applyMistralProviderConfig,
   applyMoonshotConfig,
@@ -50,7 +47,6 @@ import {
   applyZaiProviderConfig,
   CLOUDFLARE_AI_GATEWAY_DEFAULT_MODEL_REF,
   KILOCODE_DEFAULT_MODEL_REF,
-  LITELLM_DEFAULT_MODEL_REF,
   QIANFAN_DEFAULT_MODEL_REF,
   KIMI_CODING_MODEL_REF,
   MOONSHOT_DEFAULT_MODEL_REF,
@@ -64,7 +60,6 @@ import {
   setQianfanApiKey,
   setGeminiApiKey,
   setKilocodeApiKey,
-  setLitellmApiKey,
   setKimiCodingApiKey,
   setMistralApiKey,
   setMoonshotApiKey,
@@ -83,7 +78,6 @@ import { detectZaiEndpoint } from "./zai-endpoint-detect.js";
 
 const API_KEY_TOKEN_PROVIDER_AUTH_CHOICE: Record<string, AuthChoice> = {
   openrouter: "openrouter-api-key",
-  litellm: "litellm-api-key",
   "vercel-ai-gateway": "ai-gateway-api-key",
   "cloudflare-ai-gateway": "cloudflare-ai-gateway-api-key",
   moonshot: "moonshot-api-key",
@@ -406,55 +400,6 @@ export async function applyAuthChoiceApiProviders(
 
   if (authChoice === "openrouter-api-key") {
     return applyAuthChoiceOpenRouter(params);
-  }
-
-  if (authChoice === "litellm-api-key") {
-    const store = ensureAuthProfileStore(params.agentDir, { allowKeychainPrompt: false });
-    const profileOrder = resolveAuthProfileOrder({ cfg: nextConfig, store, provider: "litellm" });
-    const existingProfileId = profileOrder.find((profileId) => Boolean(store.profiles[profileId]));
-    const existingCred = existingProfileId ? store.profiles[existingProfileId] : undefined;
-    let profileId = "litellm:default";
-    let hasCredential = Boolean(existingProfileId && existingCred?.type === "api_key");
-    if (hasCredential && existingProfileId) {
-      profileId = existingProfileId;
-    }
-
-    if (!hasCredential) {
-      await ensureApiKeyFromOptionEnvOrPrompt({
-        token: params.opts?.token,
-        tokenProvider: normalizedTokenProvider,
-        secretInputMode: requestedSecretInputMode,
-        config: nextConfig,
-        expectedProviders: ["litellm"],
-        provider: "litellm",
-        envLabel: "LITELLM_API_KEY",
-        promptMessage: "Enter LiteLLM API key",
-        normalize: normalizeApiKeyInput,
-        validate: validateApiKeyInput,
-        prompter: params.prompter,
-        setCredential: async (apiKey, mode) =>
-          setLitellmApiKey(apiKey, params.agentDir, { secretInputMode: mode }),
-        noteMessage:
-          "LiteLLM provides a unified API to 100+ LLM providers.\nGet your API key from your LiteLLM proxy or https://litellm.ai\nDefault proxy runs on http://localhost:4000",
-        noteTitle: "LiteLLM",
-      });
-      hasCredential = true;
-    }
-
-    if (hasCredential) {
-      nextConfig = applyAuthProfileConfig(nextConfig, {
-        profileId,
-        provider: "litellm",
-        mode: "api_key",
-      });
-    }
-    await applyProviderDefaultModel({
-      defaultModel: LITELLM_DEFAULT_MODEL_REF,
-      applyDefaultConfig: applyLitellmConfig,
-      applyProviderConfig: applyLitellmProviderConfig,
-      noteDefault: LITELLM_DEFAULT_MODEL_REF,
-    });
-    return { config: nextConfig, agentModelOverride };
   }
 
   const simpleApiKeyProviderFlow = SIMPLE_API_KEY_PROVIDER_FLOWS[authChoice];

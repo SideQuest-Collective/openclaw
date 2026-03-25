@@ -326,7 +326,7 @@ x-i18n:
     providers: {
       "custom-proxy": {
         baseUrl: "http://localhost:4000/v1",
-        apiKey: "LITELLM_KEY",
+        apiKey: "CUSTOM_PROXY_KEY",
         api: "openai-responses",
         authHeader: true,
         headers: { "X-Proxy-Region": "us-west" },

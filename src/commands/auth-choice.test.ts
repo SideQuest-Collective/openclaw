@@ -12,7 +12,6 @@ import {
 } from "./onboard-auth.js";
 import type { AuthChoice } from "./onboard-types.js";
 import {
-  authProfilePathForAgent,
   createAuthTestLifecycle,
   createExitThrowingRuntime,
   createWizardPrompter,
@@ -64,7 +63,6 @@ describe("applyAuthChoice", () => {
     "OPENROUTER_API_KEY",
     "HF_TOKEN",
     "HUGGINGFACE_HUB_TOKEN",
-    "LITELLM_API_KEY",
     "AI_GATEWAY_API_KEY",
     "CLOUDFLARE_AI_GATEWAY_API_KEY",
     "MOONSHOT_API_KEY",
@@ -404,13 +402,6 @@ describe("applyAuthChoice", () => {
         profileId: "google:default",
         provider: "google",
         expectedModel: GOOGLE_GEMINI_DEFAULT_MODEL,
-      },
-      {
-        tokenProvider: " LITELLM  ",
-        token: "sk-litellm-token-provider-test",
-        profileId: "litellm:default",
-        provider: "litellm",
-        expectedModelPrefix: "litellm/",
       },
     ];
     for (const scenario of scenarios) {
@@ -948,68 +939,6 @@ describe("applyAuthChoice", () => {
       expect(profile?.key).toBe("");
       expect(profile?.key).not.toBe("undefined");
     }
-  });
-
-  it("ignores legacy LiteLLM oauth profiles when selecting litellm-api-key", async () => {
-    await setupTempState();
-    process.env.LITELLM_API_KEY = "sk-litellm-test";
-
-    const authProfilePath = authProfilePathForAgent(requireOpenClawAgentDir());
-    await fs.writeFile(
-      authProfilePath,
-      JSON.stringify(
-        {
-          version: 1,
-          profiles: {
-            "litellm:legacy": {
-              type: "oauth",
-              provider: "litellm",
-              access: "access-token",
-              refresh: "refresh-token",
-              expires: Date.now() + 60_000,
-            },
-          },
-        },
-        null,
-        2,
-      ),
-      "utf8",
-    );
-
-    const text = vi.fn();
-    const confirm = vi.fn(async () => true);
-    const { prompter, runtime } = createApiKeyPromptHarness({ text, confirm });
-
-    const result = await applyAuthChoice({
-      authChoice: "litellm-api-key",
-      config: {
-        auth: {
-          profiles: {
-            "litellm:legacy": { provider: "litellm", mode: "oauth" },
-          },
-          order: { litellm: ["litellm:legacy"] },
-        },
-      },
-      prompter,
-      runtime,
-      setDefaultModel: true,
-    });
-
-    expect(confirm).toHaveBeenCalledWith(
-      expect.objectContaining({
-        message: expect.stringContaining("LITELLM_API_KEY"),
-      }),
-    );
-    expect(text).not.toHaveBeenCalled();
-    expect(result.config.auth?.profiles?.["litellm:default"]).toMatchObject({
-      provider: "litellm",
-      mode: "api_key",
-    });
-
-    expect(await readAuthProfile("litellm:default")).toMatchObject({
-      type: "api_key",
-      key: "sk-litellm-test",
-    });
   });
 
   it("configures cloudflare ai gateway via env key and explicit opts", async () => {

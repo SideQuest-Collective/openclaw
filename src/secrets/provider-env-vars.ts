@@ -12,7 +12,6 @@ export const PROVIDER_ENV_VARS: Record<string, readonly string[]> = {
   xiaomi: ["XIAOMI_API_KEY"],
   openrouter: ["OPENROUTER_API_KEY"],
   "cloudflare-ai-gateway": ["CLOUDFLARE_AI_GATEWAY_API_KEY"],
-  litellm: ["LITELLM_API_KEY"],
   "vercel-ai-gateway": ["AI_GATEWAY_API_KEY"],
   opencode: ["OPENCODE_API_KEY", "OPENCODE_ZEN_API_KEY"],
   together: ["TOGETHER_API_KEY"],

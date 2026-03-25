@@ -295,7 +295,7 @@ OPENCLAW_LIVE_CLI_BACKEND=1 \
 如果你有凭证/配置，可以在实时矩阵中包含更多提供商：
 
 - 内置：`openai`、`openai-codex`、`anthropic`、`google`、`google-vertex`、`google-antigravity`、`google-gemini-cli`、`zai`、`openrouter`、`opencode`、`xai`、`groq`、`cerebras`、`mistral`、`github-copilot`
-- 通过 `models.providers`（自定义端点）：`minimax`（云/API），以及任何 OpenAI/Anthropic 兼容代理（LM Studio、vLLM、LiteLLM 等）
+- 通过 `models.providers`（自定义端点）：`minimax`（云/API），以及任何 OpenAI/Anthropic 兼容代理（LM Studio、vLLM 等）
 
 提示：不要试图在文档中硬编码"所有模型"。权威列表是你机器上 `discoverModels(...)` 返回的内容 + 可用的密钥。
 

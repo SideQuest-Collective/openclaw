@@ -168,12 +168,6 @@ const AUTH_CHOICE_GROUP_DEFS: {
     choices: ["venice-api-key"],
   },
   {
-    value: "litellm",
-    label: "LiteLLM",
-    hint: "Unified LLM gateway (100+ providers)",
-    choices: ["litellm-api-key"],
-  },
-  {
     value: "cloudflare-ai-gateway",
     label: "Cloudflare AI Gateway",
     hint: "Account ID + Gateway ID + API key",
@@ -188,7 +182,6 @@ const AUTH_CHOICE_GROUP_DEFS: {
 ];
 
 const PROVIDER_AUTH_CHOICE_OPTION_HINTS: Partial<Record<AuthChoice, string>> = {
-  "litellm-api-key": "Unified gateway for 100+ LLM providers",
   "cloudflare-ai-gateway-api-key": "Account ID + Gateway ID + API key",
   "venice-api-key": "Privacy-focused inference (uncensored models)",
   "together-api-key": "Access to Llama, DeepSeek, Qwen, and more open models",

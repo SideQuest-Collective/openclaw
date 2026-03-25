@@ -2369,7 +2369,7 @@ noVNC URL 会注入系统提示中，以便智能体可以引用它。
 ### `models`（自定义提供商 + 基础 URL）
 
 OpenClaw 使用 **pi-coding-agent** 模型目录。你可以通过编写
-`~/.openclaw/agents/<agentId>/agent/models.json` 或在 OpenClaw 配置中的 `models.providers` 下定义相同的 schema 来添加自定义提供商（LiteLLM、本地 OpenAI 兼容服务器、Anthropic 代理等）。
+`~/.openclaw/agents/<agentId>/agent/models.json` 或在 OpenClaw 配置中的 `models.providers` 下定义相同的 schema 来添加自定义提供商（本地 OpenAI 兼容服务器、Anthropic 代理等）。
 按提供商的概述 + 示例：[/concepts/model-providers](/concepts/model-providers)。
 
 当存在 `models.providers` 时，OpenClaw 在启动时将 `models.json` 写入/合并到
@@ -2395,7 +2395,7 @@ OpenClaw 使用 **pi-coding-agent** 模型目录。你可以通过编写
     providers: {
       "custom-proxy": {
         baseUrl: "http://localhost:4000/v1",
-        apiKey: "LITELLM_KEY",
+        apiKey: "CUSTOM_PROXY_KEY",
         api: "openai-completions",
         models: [
           {

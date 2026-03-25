@@ -1956,7 +1956,7 @@ OpenClaw uses the pi-coding-agent model catalog. Add custom providers via `model
     providers: {
       "custom-proxy": {
         baseUrl: "http://localhost:4000/v1",
-        apiKey: "LITELLM_KEY",
+        apiKey: "CUSTOM_PROXY_KEY",
         api: "openai-completions", // openai-completions | openai-responses | anthropic-messages | google-generative-ai
         models: [
           {

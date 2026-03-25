@@ -21,7 +21,6 @@ type OnboardProviderAuthOptionKey = keyof Pick<
   | "huggingfaceApiKey"
   | "opencodeZenApiKey"
   | "xaiApiKey"
-  | "litellmApiKey"
   | "qianfanApiKey"
   | "volcengineApiKey"
   | "byteplusApiKey"
@@ -169,13 +168,6 @@ export const ONBOARD_PROVIDER_AUTH_FLAGS: ReadonlyArray<OnboardProviderAuthFlag>
     cliFlag: "--xai-api-key",
     cliOption: "--xai-api-key <key>",
     description: "xAI API key",
-  },
-  {
-    optionKey: "litellmApiKey",
-    authChoice: "litellm-api-key",
-    cliFlag: "--litellm-api-key",
-    cliOption: "--litellm-api-key <key>",
-    description: "LiteLLM API key",
   },
   {
     optionKey: "qianfanApiKey",

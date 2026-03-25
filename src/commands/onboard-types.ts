@@ -14,7 +14,6 @@ export type AuthChoice =
   | "openai-api-key"
   | "openrouter-api-key"
   | "kilocode-api-key"
-  | "litellm-api-key"
   | "ai-gateway-api-key"
   | "cloudflare-ai-gateway-api-key"
   | "moonshot-api-key"
@@ -60,7 +59,6 @@ export type AuthChoiceGroupId =
   | "copilot"
   | "openrouter"
   | "kilocode"
-  | "litellm"
   | "ai-gateway"
   | "cloudflare-ai-gateway"
   | "moonshot"
@@ -115,7 +113,6 @@ export type OnboardOptions = {
   mistralApiKey?: string;
   openrouterApiKey?: string;
   kilocodeApiKey?: string;
-  litellmApiKey?: string;
   aiGatewayApiKey?: string;
   cloudflareAiGatewayAccountId?: string;
   cloudflareAiGatewayGatewayId?: string;

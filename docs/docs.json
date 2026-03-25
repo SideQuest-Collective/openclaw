@@ -1103,7 +1103,6 @@
                   "providers/github-copilot",
                   "providers/huggingface",
                   "providers/kilocode",
-                  "providers/litellm",
                   "providers/glm",
                   "providers/minimax",
                   "providers/moonshot",

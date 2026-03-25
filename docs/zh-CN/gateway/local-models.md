@@ -3,7 +3,7 @@ read_when:
   - 你想从自己的 GPU 机器提供模型服务
   - 你正在配置 LM Studio 或 OpenAI 兼容代理
   - 你需要最安全的本地模型指南
-summary: 在本地 LLM 上运行 OpenClaw（LM Studio、vLLM、LiteLLM、自定义 OpenAI 端点）
+summary: 在本地 LLM 上运行 OpenClaw（LM Studio、vLLM、自定义 OpenAI 端点）
 title: 本地模型
 x-i18n:
   generated_at: "2026-02-03T07:48:15Z"
@@ -119,7 +119,7 @@ x-i18n:
 
 ## 其他 OpenAI 兼容本地代理
 
-vLLM、LiteLLM、OAI-proxy 或自定义网关都可以工作，只要它们暴露 OpenAI 风格的 `/v1` 端点。用你的端点和模型 ID 替换上面的 provider 块：
+vLLM、OAI-proxy 或自定义网关都可以工作，只要它们暴露 OpenAI 风格的 `/v1` 端点。用你的端点和模型 ID 替换上面的 provider 块：
 
 ```json5
 {

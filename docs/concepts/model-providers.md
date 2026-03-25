@@ -397,7 +397,7 @@ Then set a model (replace with one of the IDs returned by `/v1/models`):
 
 See [/providers/vllm](/providers/vllm) for details.
 
-### Local proxies (LM Studio, vLLM, LiteLLM, etc.)
+### Local proxies (LM Studio, vLLM, etc.)
 
 Example (OpenAI‑compatible):
 

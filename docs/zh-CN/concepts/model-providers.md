@@ -263,7 +263,7 @@ ollama pull llama3.3
 
 当 Ollama 在本地 `http://127.0.0.1:11434/v1` 运行时会自动检测。参见 [/providers/ollama](/providers/ollama) 了解模型推荐和自定义配置。
 
-### 本地代理（LM Studio、vLLM、LiteLLM 等）
+### 本地代理（LM Studio、vLLM 等）
 
 示例（OpenAI 兼容）：
 
