@@ -4,7 +4,15 @@ import os from "node:os";
 
 // On Windows, `.cmd` launchers can fail with `spawn EINVAL` when invoked without a shell
 // (especially under GitHub Actions + Git Bash). Use `shell: true` and let the shell resolve pnpm.
-const pnpm = "pnpm";
+function resolvePnpmLauncher() {
+  const execPath = process.env.npm_execpath;
+  if (execPath && /(?:^|[/\\])pnpm(?:\.cjs)?$/.test(execPath)) {
+    return { command: process.execPath, prefixArgs: [execPath] };
+  }
+  return { command: "pnpm", prefixArgs: [] };
+}
+
+const pnpm = resolvePnpmLauncher();
 
 const unitIsolatedFilesRaw = [
   "src/plugins/loader.test.ts",
@@ -362,7 +370,7 @@ const runOnce = (entry, extraArgs = []) =>
       : nextNodeOptions;
     let child;
     try {
-      child = spawn(pnpm, args, {
+      child = spawn(pnpm.command, [...pnpm.prefixArgs, ...args], {
         stdio: "inherit",
         env: { ...process.env, VITEST_GROUP: entry.name, NODE_OPTIONS: resolvedNodeOptions },
         shell: isWindows,
@@ -429,7 +437,7 @@ if (passthroughArgs.length > 0) {
   const code = await new Promise((resolve) => {
     let child;
     try {
-      child = spawn(pnpm, args, {
+      child = spawn(pnpm.command, [...pnpm.prefixArgs, ...args], {
         stdio: "inherit",
         env: { ...process.env, NODE_OPTIONS: nextNodeOptions },
         shell: isWindows,
