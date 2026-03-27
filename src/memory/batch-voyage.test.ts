@@ -2,12 +2,22 @@ import { ReadableStream } from "node:stream/web";
 import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import type { VoyageBatchOutputLine, VoyageBatchRequest } from "./batch-voyage.js";
 import type { VoyageEmbeddingClient } from "./embeddings-voyage.js";
+import { withRemoteHttpResponse } from "./remote-http.js";
 
 // Mock internal.js if needed, but runWithConcurrency is simple enough to keep real.
 // We DO need to mock retryAsync to avoid actual delays/retries logic complicating tests
 vi.mock("../infra/retry.js", () => ({
   retryAsync: async <T>(fn: () => Promise<T>) => fn(),
 }));
+vi.mock("./remote-http.js", async () => {
+  const actual = await vi.importActual<typeof import("./remote-http.js")>("./remote-http.js");
+  return {
+    ...actual,
+    withRemoteHttpResponse: vi.fn(),
+  };
+});
+
+const withRemoteHttpResponseMock = vi.mocked(withRemoteHttpResponse);
 
 describe("runVoyageEmbeddingBatches", () => {
   let runVoyageEmbeddingBatches: typeof import("./batch-voyage.js").runVoyageEmbeddingBatches;
@@ -18,7 +28,6 @@ describe("runVoyageEmbeddingBatches", () => {
 
   afterEach(() => {
     vi.resetAllMocks();
-    vi.unstubAllGlobals();
   });
 
   const mockClient: VoyageEmbeddingClient = {
@@ -33,38 +42,6 @@ describe("runVoyageEmbeddingBatches", () => {
   ];
 
   it("successfully submits batch, waits, and streams results", async () => {
-    const fetchMock = vi.fn();
-    vi.stubGlobal("fetch", fetchMock);
-
-    // Sequence of fetch calls:
-    // 1. Upload file
-    fetchMock.mockResolvedValueOnce({
-      ok: true,
-      json: async () => ({ id: "file-123" }),
-    });
-
-    // 2. Create batch
-    fetchMock.mockResolvedValueOnce({
-      ok: true,
-      json: async () => ({ id: "batch-abc", status: "pending" }),
-    });
-
-    // 3. Poll status (pending) - Optional depending on wait loop, let's say it finishes immediately for this test
-    // Actually the code does: initial check (if completed) -> wait loop.
-    // If create returns "pending", it enters waitForVoyageBatch.
-    // waitForVoyageBatch fetches status.
-
-    // 3. Poll status (completed)
-    fetchMock.mockResolvedValueOnce({
-      ok: true,
-      json: async () => ({
-        id: "batch-abc",
-        status: "completed",
-        output_file_id: "file-out-999",
-      }),
-    });
-
-    // 4. Download content (Streaming)
     const outputLines: VoyageBatchOutputLine[] = [
       {
         custom_id: "req-1",
@@ -84,10 +61,42 @@ describe("runVoyageEmbeddingBatches", () => {
         controller.close();
       },
     });
-
-    fetchMock.mockResolvedValueOnce({
-      ok: true,
-      body: stream,
+    withRemoteHttpResponseMock.mockImplementation(async (params) => {
+      if (params.url.endsWith("/files")) {
+        return await params.onResponse(
+          new Response(JSON.stringify({ id: "file-123" }), {
+            status: 200,
+            headers: { "Content-Type": "application/json" },
+          }),
+        );
+      }
+      if (params.url.endsWith("/batches")) {
+        return await params.onResponse(
+          new Response(JSON.stringify({ id: "batch-abc", status: "pending" }), {
+            status: 200,
+            headers: { "Content-Type": "application/json" },
+          }),
+        );
+      }
+      if (params.url.endsWith("/batches/batch-abc")) {
+        return await params.onResponse(
+          new Response(
+            JSON.stringify({
+              id: "batch-abc",
+              status: "completed",
+              output_file_id: "file-out-999",
+            }),
+            {
+              status: 200,
+              headers: { "Content-Type": "application/json" },
+            },
+          ),
+        );
+      }
+      if (params.url.endsWith("/files/file-out-999/content")) {
+        return await params.onResponse(new Response(stream, { status: 200 }));
+      }
+      throw new Error(`unexpected remote http ${params.url}`);
     });
 
     const results = await runVoyageEmbeddingBatches({
@@ -105,17 +114,19 @@ describe("runVoyageEmbeddingBatches", () => {
     expect(results.get("req-2")).toEqual([0.2, 0.2]);
 
     // Verify calls
-    expect(fetchMock).toHaveBeenCalledTimes(4);
+    expect(withRemoteHttpResponseMock).toHaveBeenCalledTimes(4);
 
     // Verify File Upload
-    expect(fetchMock.mock.calls[0][0]).toContain("/files");
-    const uploadBody = fetchMock.mock.calls[0][1].body as FormData;
+    expect(withRemoteHttpResponseMock.mock.calls[0]?.[0]?.url).toContain("/files");
+    const uploadBody = withRemoteHttpResponseMock.mock.calls[0]?.[0]?.init?.body as FormData;
     expect(uploadBody).toBeInstanceOf(FormData);
     expect(uploadBody.get("purpose")).toBe("batch");
 
     // Verify Batch Create
-    expect(fetchMock.mock.calls[1][0]).toContain("/batches");
-    const createBody = JSON.parse(fetchMock.mock.calls[1][1].body);
+    expect(withRemoteHttpResponseMock.mock.calls[1]?.[0]?.url).toContain("/batches");
+    const createBodyRaw = withRemoteHttpResponseMock.mock.calls[1]?.[0]?.init?.body;
+    expect(typeof createBodyRaw).toBe("string");
+    const createBody = JSON.parse((createBodyRaw as string | undefined) ?? "{}");
     expect(createBody.input_file_id).toBe("file-123");
     expect(createBody.completion_window).toBe("12h");
     expect(createBody.request_params).toEqual({
@@ -124,21 +135,12 @@ describe("runVoyageEmbeddingBatches", () => {
     });
 
     // Verify Content Fetch
-    expect(fetchMock.mock.calls[3][0]).toContain("/files/file-out-999/content");
+    expect(withRemoteHttpResponseMock.mock.calls[3]?.[0]?.url).toContain(
+      "/files/file-out-999/content",
+    );
   });
 
   it("handles empty lines and stream chunks correctly", async () => {
-    const fetchMock = vi.fn();
-    vi.stubGlobal("fetch", fetchMock);
-
-    // 1. Upload
-    fetchMock.mockResolvedValueOnce({ ok: true, json: async () => ({ id: "f1" }) });
-    // 2. Create (completed immediately)
-    fetchMock.mockResolvedValueOnce({
-      ok: true,
-      json: async () => ({ id: "b1", status: "completed", output_file_id: "out1" }),
-    });
-    // 3. Download Content (Streaming with chunks and newlines)
     const stream = new ReadableStream({
       start(controller) {
         const line1 = JSON.stringify({
@@ -157,8 +159,28 @@ describe("runVoyageEmbeddingBatches", () => {
         controller.close();
       },
     });
-
-    fetchMock.mockResolvedValueOnce({ ok: true, body: stream });
+    withRemoteHttpResponseMock.mockImplementation(async (params) => {
+      if (params.url.endsWith("/files")) {
+        return await params.onResponse(
+          new Response(JSON.stringify({ id: "f1" }), {
+            status: 200,
+            headers: { "Content-Type": "application/json" },
+          }),
+        );
+      }
+      if (params.url.endsWith("/batches")) {
+        return await params.onResponse(
+          new Response(JSON.stringify({ id: "b1", status: "completed", output_file_id: "out1" }), {
+            status: 200,
+            headers: { "Content-Type": "application/json" },
+          }),
+        );
+      }
+      if (params.url.endsWith("/files/out1/content")) {
+        return await params.onResponse(new Response(stream, { status: 200 }));
+      }
+      throw new Error(`unexpected remote http ${params.url}`);
+    });
 
     const results = await runVoyageEmbeddingBatches({
       client: mockClient,

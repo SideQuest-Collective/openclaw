@@ -5,6 +5,7 @@ import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } 
 import { useFastShortTimeouts } from "../../test/helpers/fast-short-timeouts.js";
 import type { OpenClawConfig } from "../config/config.js";
 import { getMemorySearchManager, type MemoryIndexManager } from "./index.js";
+import { withRemoteHttpResponse } from "./remote-http.js";
 import { createOpenAIEmbeddingProviderMock } from "./test-embeddings-mock.js";
 import "./test-runtime-mocks.js";
 
@@ -18,6 +19,15 @@ vi.mock("./embeddings.js", () => ({
       embedBatch,
     }),
 }));
+vi.mock("./remote-http.js", async () => {
+  const actual = await vi.importActual<typeof import("./remote-http.js")>("./remote-http.js");
+  return {
+    ...actual,
+    withRemoteHttpResponse: vi.fn(),
+  };
+});
+
+const withRemoteHttpResponseMock = vi.mocked(withRemoteHttpResponse);
 
 describe("memory indexing with OpenAI batches", () => {
   let fixtureRoot: string;
@@ -47,34 +57,42 @@ describe("memory indexing with OpenAI batches", () => {
   }) {
     let uploadedRequests: Array<{ custom_id?: string }> = [];
     const state = { batchCreates: 0 };
-    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
-      const url =
-        typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
+    withRemoteHttpResponseMock.mockImplementation(async (params) => {
+      const url = params.url;
+      const init = params.init;
       if (url.endsWith("/files")) {
         const body = init?.body;
         if (!(body instanceof FormData)) {
           throw new Error("expected FormData upload");
         }
         uploadedRequests = await readOpenAIBatchUploadRequests(body);
-        return new Response(JSON.stringify({ id: "file_1" }), {
-          status: 200,
-          headers: { "Content-Type": "application/json" },
-        });
+        return await params.onResponse(
+          new Response(JSON.stringify({ id: "file_1" }), {
+            status: 200,
+            headers: { "Content-Type": "application/json" },
+          }),
+        );
       }
       if (url.endsWith("/batches")) {
         state.batchCreates += 1;
         if (options?.onCreateBatch) {
-          return await options.onCreateBatch({ batchCreates: state.batchCreates });
+          return await params.onResponse(
+            await options.onCreateBatch({ batchCreates: state.batchCreates }),
+          );
         }
-        return new Response(JSON.stringify({ id: "batch_1", status: "in_progress" }), {
-          status: 200,
-          headers: { "Content-Type": "application/json" },
-        });
+        return await params.onResponse(
+          new Response(JSON.stringify({ id: "batch_1", status: "in_progress" }), {
+            status: 200,
+            headers: { "Content-Type": "application/json" },
+          }),
+        );
       }
       if (url.endsWith("/batches/batch_1")) {
-        return new Response(
-          JSON.stringify({ id: "batch_1", status: "completed", output_file_id: "file_out" }),
-          { status: 200, headers: { "Content-Type": "application/json" } },
+        return await params.onResponse(
+          new Response(
+            JSON.stringify({ id: "batch_1", status: "completed", output_file_id: "file_out" }),
+            { status: 200, headers: { "Content-Type": "application/json" } },
+          ),
         );
       }
       if (url.endsWith("/files/file_out/content")) {
@@ -87,14 +105,16 @@ describe("memory indexing with OpenAI batches", () => {
             },
           }),
         );
-        return new Response(lines.join("\n"), {
-          status: 200,
-          headers: { "Content-Type": "application/jsonl" },
-        });
+        return await params.onResponse(
+          new Response(lines.join("\n"), {
+            status: 200,
+            headers: { "Content-Type": "application/jsonl" },
+          }),
+        );
       }
-      throw new Error(`unexpected fetch ${url}`);
+      throw new Error(`unexpected remote http ${url}`);
     });
-    return { fetchMock, state };
+    return { fetchMock: withRemoteHttpResponseMock, state };
   }
 
   function createBatchCfg(): OpenClawConfig {
@@ -142,6 +162,7 @@ describe("memory indexing with OpenAI batches", () => {
   beforeEach(async () => {
     embedBatch.mockClear();
     embedQuery.mockClear();
+    withRemoteHttpResponseMock.mockReset();
     embedBatch.mockImplementation(async (texts: string[]) =>
       texts.map((_text, index) => [index + 1, 0, 0]),
     );
@@ -163,7 +184,7 @@ describe("memory indexing with OpenAI batches", () => {
   });
 
   afterEach(async () => {
-    vi.unstubAllGlobals();
+    vi.resetAllMocks();
   });
 
   it("uses OpenAI batch uploads when enabled", async () => {
@@ -172,8 +193,6 @@ describe("memory indexing with OpenAI batches", () => {
     await fs.writeFile(path.join(memoryDir, "2026-01-07.md"), content);
 
     const { fetchMock } = createOpenAIBatchFetchMock();
-
-    vi.stubGlobal("fetch", fetchMock);
 
     try {
       if (!manager) {
@@ -203,7 +222,7 @@ describe("memory indexing with OpenAI batches", () => {
     const content = ["retry", "the", "batch"].join("\n\n");
     await fs.writeFile(path.join(memoryDir, "2026-01-08.md"), content);
 
-    const { fetchMock, state } = createOpenAIBatchFetchMock({
+    const { state } = createOpenAIBatchFetchMock({
       onCreateBatch: ({ batchCreates }) => {
         if (batchCreates === 1) {
           return new Response("upstream connect error", { status: 503 });
@@ -214,8 +233,6 @@ describe("memory indexing with OpenAI batches", () => {
         });
       },
     });
-
-    vi.stubGlobal("fetch", fetchMock);
 
     try {
       if (!manager) {
@@ -253,8 +270,6 @@ describe("memory indexing with OpenAI batches", () => {
               headers: { "Content-Type": "application/json" },
             }),
     });
-
-    vi.stubGlobal("fetch", fetchMock);
 
     try {
       if (!manager) {

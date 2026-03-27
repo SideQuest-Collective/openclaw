@@ -1,23 +1,32 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import * as authModule from "../agents/model-auth.js";
-import { type FetchMock, withFetchPreconnect } from "../test-utils/fetch-mock.js";
 import { createVoyageEmbeddingProvider, normalizeVoyageModel } from "./embeddings-voyage.js";
+import { withRemoteHttpResponse } from "./remote-http.js";
 
 vi.mock("../agents/model-auth.js", async () => {
   const { createModelAuthMockModule } = await import("../test-utils/model-auth-mock.js");
   return createModelAuthMockModule();
 });
+vi.mock("./remote-http.js", async () => {
+  const actual = await vi.importActual<typeof import("./remote-http.js")>("./remote-http.js");
+  return {
+    ...actual,
+    withRemoteHttpResponse: vi.fn(),
+  };
+});
 
-const createFetchMock = () => {
-  const fetchMock = vi.fn<FetchMock>(
-    async (_input: RequestInfo | URL, _init?: RequestInit) =>
-      new Response(JSON.stringify({ data: [{ embedding: [0.1, 0.2, 0.3] }] }), {
+const withRemoteHttpResponseMock = vi.mocked(withRemoteHttpResponse);
+
+function mockVoyageResponse(payload: unknown): void {
+  withRemoteHttpResponseMock.mockImplementation(async (params) => {
+    return await params.onResponse(
+      new Response(JSON.stringify(payload), {
         status: 200,
         headers: { "Content-Type": "application/json" },
       }),
-  );
-  return withFetchPreconnect(fetchMock);
-};
+    );
+  });
+}
 
 function mockVoyageApiKey() {
   vi.mocked(authModule.resolveApiKeyForProvider).mockResolvedValue({
@@ -27,11 +36,7 @@ function mockVoyageApiKey() {
   });
 }
 
-async function createDefaultVoyageProvider(
-  model: string,
-  fetchMock: ReturnType<typeof createFetchMock>,
-) {
-  vi.stubGlobal("fetch", fetchMock);
+async function createDefaultVoyageProvider(model: string, _requestMock?: unknown) {
   mockVoyageApiKey();
   return createVoyageEmbeddingProvider({
     config: {} as never,
@@ -44,12 +49,11 @@ async function createDefaultVoyageProvider(
 describe("voyage embedding provider", () => {
   afterEach(() => {
     vi.resetAllMocks();
-    vi.unstubAllGlobals();
   });
 
   it("configures client with correct defaults and headers", async () => {
-    const fetchMock = createFetchMock();
-    const result = await createDefaultVoyageProvider("voyage-4-large", fetchMock);
+    mockVoyageResponse({ data: [{ embedding: [0.1, 0.2, 0.3] }] });
+    const result = await createDefaultVoyageProvider("voyage-4-large");
 
     await result.provider.embedQuery("test query");
 
@@ -57,9 +61,9 @@ describe("voyage embedding provider", () => {
       expect.objectContaining({ provider: "voyage" }),
     );
 
-    const call = fetchMock.mock.calls[0];
+    const call = withRemoteHttpResponseMock.mock.calls[0];
     expect(call).toBeDefined();
-    const [url, init] = call as [RequestInfo | URL, RequestInit | undefined];
+    const [{ url, init }] = call as [{ url: string; init?: RequestInit }];
     expect(url).toBe("https://api.voyageai.com/v1/embeddings");
 
     const headers = (init?.headers ?? {}) as Record<string, string>;
@@ -75,8 +79,7 @@ describe("voyage embedding provider", () => {
   });
 
   it("respects remote overrides for baseUrl and apiKey", async () => {
-    const fetchMock = createFetchMock();
-    vi.stubGlobal("fetch", fetchMock);
+    mockVoyageResponse({ data: [{ embedding: [0.1, 0.2, 0.3] }] });
 
     const result = await createVoyageEmbeddingProvider({
       config: {} as never,
@@ -92,9 +95,9 @@ describe("voyage embedding provider", () => {
 
     await result.provider.embedQuery("test");
 
-    const call = fetchMock.mock.calls[0];
+    const call = withRemoteHttpResponseMock.mock.calls[0];
     expect(call).toBeDefined();
-    const [url, init] = call as [RequestInfo | URL, RequestInit | undefined];
+    const [{ url, init }] = call as [{ url: string; init?: RequestInit }];
     expect(url).toBe("https://example.com/embeddings");
 
     const headers = (init?.headers ?? {}) as Record<string, string>;
@@ -103,24 +106,16 @@ describe("voyage embedding provider", () => {
   });
 
   it("passes input_type=document for embedBatch", async () => {
-    const fetchMock = withFetchPreconnect(
-      vi.fn<FetchMock>(
-        async (_input: RequestInfo | URL, _init?: RequestInit) =>
-          new Response(
-            JSON.stringify({
-              data: [{ embedding: [0.1, 0.2] }, { embedding: [0.3, 0.4] }],
-            }),
-            { status: 200, headers: { "Content-Type": "application/json" } },
-          ),
-      ),
-    );
-    const result = await createDefaultVoyageProvider("voyage-4-large", fetchMock);
+    mockVoyageResponse({
+      data: [{ embedding: [0.1, 0.2] }, { embedding: [0.3, 0.4] }],
+    });
+    const result = await createDefaultVoyageProvider("voyage-4-large");
 
     await result.provider.embedBatch(["doc1", "doc2"]);
 
-    const call = fetchMock.mock.calls[0];
+    const call = withRemoteHttpResponseMock.mock.calls[0];
     expect(call).toBeDefined();
-    const [, init] = call as [RequestInfo | URL, RequestInit | undefined];
+    const [{ init }] = call as [{ url: string; init?: RequestInit }];
     const body = JSON.parse(init?.body as string);
     expect(body).toEqual({
       model: "voyage-4-large",

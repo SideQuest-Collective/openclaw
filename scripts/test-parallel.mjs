@@ -1,6 +1,7 @@
 import { spawn } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
+import path from "node:path";
 
 // On Windows, `.cmd` launchers can fail with `spawn EINVAL` when invoked without a shell
 // (especially under GitHub Actions + Git Bash). Use `shell: true` and let the shell resolve pnpm.
@@ -13,6 +14,19 @@ function resolvePnpmLauncher() {
 }
 
 const pnpm = resolvePnpmLauncher();
+
+function resolveVitestLauncher() {
+  const localBin = path.resolve(
+    "node_modules/.bin",
+    process.platform === "win32" ? "vitest.cmd" : "vitest",
+  );
+  if (fs.existsSync(localBin)) {
+    return { command: localBin, prefixArgs: [] };
+  }
+  return { command: pnpm.command, prefixArgs: [...pnpm.prefixArgs, "vitest"] };
+}
+
+const vitest = resolveVitestLauncher();
 
 const unitIsolatedFilesRaw = [
   "src/plugins/loader.test.ts",
@@ -96,6 +110,18 @@ const unitIsolatedFilesRaw = [
   "src/imessage/monitor.shutdown.unhandled-rejection.test.ts",
 ];
 const unitIsolatedFiles = unitIsolatedFilesRaw.filter((file) => fs.existsSync(file));
+const unitSingleRunFilesRaw = [
+  // These files pass in isolation but are high-variance when batched with other unit suites.
+  "src/slack/monitor/media.test.ts",
+  "src/memory/embeddings.test.ts",
+  "src/memory/embeddings-voyage.test.ts",
+  "src/memory/manager.batch.test.ts",
+  "src/canvas-host/server.test.ts",
+  "src/media/server.test.ts",
+  "src/media/server.outside-workspace.test.ts",
+  "src/infra/ports.test.ts",
+];
+const unitSingleRunFiles = unitSingleRunFilesRaw.filter((file) => fs.existsSync(file));
 
 const children = new Set();
 const isCI = process.env.CI === "true" || process.env.GITHUB_ACTIONS === "true";
@@ -131,7 +157,7 @@ const runs = [
             "vitest.unit.config.ts",
             "--pool=vmForks",
             ...(disableIsolation ? ["--isolate=false"] : []),
-            ...unitIsolatedFiles.flatMap((file) => ["--exclude", file]),
+            ...[...unitIsolatedFiles, ...unitSingleRunFiles].flatMap((file) => ["--exclude", file]),
           ],
         },
         {
@@ -145,12 +171,28 @@ const runs = [
             ...unitIsolatedFiles,
           ],
         },
+        ...unitSingleRunFiles.map((file) => ({
+          name: "unit-single",
+          serial: true,
+          args: ["vitest", "run", "--config", "vitest.unit.config.ts", "--pool=forks", file],
+        })),
       ]
     : [
         {
           name: "unit",
-          args: ["vitest", "run", "--config", "vitest.unit.config.ts"],
+          args: [
+            "vitest",
+            "run",
+            "--config",
+            "vitest.unit.config.ts",
+            ...unitSingleRunFiles.flatMap((file) => ["--exclude", file]),
+          ],
         },
+        ...unitSingleRunFiles.map((file) => ({
+          name: "unit-single",
+          serial: true,
+          args: ["vitest", "run", "--config", "vitest.unit.config.ts", "--pool=forks", file],
+        })),
       ]),
   ...(includeExtensionsSuite
     ? [
@@ -234,8 +276,12 @@ const keepGatewaySerial =
   process.env.OPENCLAW_TEST_SERIAL_GATEWAY === "1" ||
   testProfile === "serial" ||
   !parallelGatewayEnabled;
-const parallelRuns = keepGatewaySerial ? runs.filter((entry) => entry.name !== "gateway") : runs;
-const serialRuns = keepGatewaySerial ? runs.filter((entry) => entry.name === "gateway") : [];
+const parallelRuns = runs.filter(
+  (entry) => !entry.serial && (!keepGatewaySerial || entry.name !== "gateway"),
+);
+const serialRuns = runs.filter(
+  (entry) => entry.serial || (keepGatewaySerial && entry.name === "gateway"),
+);
 const baseLocalWorkers = Math.max(4, Math.min(16, hostCpuCount));
 const loadAwareDisabledRaw = process.env.OPENCLAW_TEST_LOAD_AWARE?.trim().toLowerCase();
 const loadAwareDisabled = loadAwareDisabledRaw === "0" || loadAwareDisabledRaw === "false";
@@ -307,6 +353,9 @@ const maxWorkersForRun = (name) => {
   if (name === "unit-isolated") {
     return defaultWorkerBudget.unitIsolated;
   }
+  if (name === "unit-single") {
+    return 1;
+  }
   if (name === "extensions") {
     return defaultWorkerBudget.extensions;
   }
@@ -315,13 +364,6 @@ const maxWorkersForRun = (name) => {
   }
   return defaultWorkerBudget.unit;
 };
-
-const WARNING_SUPPRESSION_FLAGS = [
-  "--disable-warning=ExperimentalWarning",
-  "--disable-warning=DEP0040",
-  "--disable-warning=DEP0060",
-  "--disable-warning=MaxListenersExceededWarning",
-];
 
 const DEFAULT_CI_MAX_OLD_SPACE_SIZE_MB = 4096;
 const maxOldSpaceSizeMb = (() => {
@@ -356,11 +398,7 @@ const runOnce = (entry, extraArgs = []) =>
           ...extraArgs,
         ]
       : [...entryArgs, ...silentArgs, ...windowsCiArgs, ...extraArgs];
-    const nodeOptions = process.env.NODE_OPTIONS ?? "";
-    const nextNodeOptions = WARNING_SUPPRESSION_FLAGS.reduce(
-      (acc, flag) => (acc.includes(flag) ? acc : `${acc} ${flag}`.trim()),
-      nodeOptions,
-    );
+    const nextNodeOptions = process.env.NODE_OPTIONS ?? "";
     const heapFlag =
       maxOldSpaceSizeMb && !nextNodeOptions.includes("--max-old-space-size=")
         ? `--max-old-space-size=${maxOldSpaceSizeMb}`
@@ -368,11 +406,17 @@ const runOnce = (entry, extraArgs = []) =>
     const resolvedNodeOptions = heapFlag
       ? `${nextNodeOptions} ${heapFlag}`.trim()
       : nextNodeOptions;
+    const [runnerCommand, ...runnerArgs] = args;
+    const launcher = runnerCommand === "vitest" ? vitest : pnpm;
+    const spawnArgs =
+      runnerCommand === "vitest"
+        ? [...launcher.prefixArgs, ...runnerArgs]
+        : [...launcher.prefixArgs, ...args];
     let child;
     try {
-      child = spawn(pnpm.command, [...pnpm.prefixArgs, ...args], {
+      child = spawn(launcher.command, spawnArgs, {
         stdio: "inherit",
-        env: { ...process.env, VITEST_GROUP: entry.name, NODE_OPTIONS: resolvedNodeOptions },
+        env: { ...process.env, NODE_OPTIONS: resolvedNodeOptions },
         shell: isWindows,
       });
     } catch (err) {
@@ -429,15 +473,17 @@ if (passthroughArgs.length > 0) {
         ...passthroughArgs,
       ]
     : ["vitest", "run", ...silentArgs, ...windowsCiArgs, ...passthroughArgs];
-  const nodeOptions = process.env.NODE_OPTIONS ?? "";
-  const nextNodeOptions = WARNING_SUPPRESSION_FLAGS.reduce(
-    (acc, flag) => (acc.includes(flag) ? acc : `${acc} ${flag}`.trim()),
-    nodeOptions,
-  );
+  const nextNodeOptions = process.env.NODE_OPTIONS ?? "";
+  const [runnerCommand, ...runnerArgs] = args;
+  const launcher = runnerCommand === "vitest" ? vitest : pnpm;
+  const spawnArgs =
+    runnerCommand === "vitest"
+      ? [...launcher.prefixArgs, ...runnerArgs]
+      : [...launcher.prefixArgs, ...args];
   const code = await new Promise((resolve) => {
     let child;
     try {
-      child = spawn(pnpm.command, [...pnpm.prefixArgs, ...args], {
+      child = spawn(launcher.command, spawnArgs, {
         stdio: "inherit",
         env: { ...process.env, NODE_OPTIONS: nextNodeOptions },
         shell: isWindows,

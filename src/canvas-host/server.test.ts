@@ -1,6 +1,6 @@
 import fs from "node:fs/promises";
 import { createServer } from "node:http";
-import type { AddressInfo } from "node:net";
+import net, { type AddressInfo } from "node:net";
 import os from "node:os";
 import path from "node:path";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
@@ -51,7 +51,41 @@ vi.mock("chokidar", () => {
   };
 });
 
-describe("canvas host", () => {
+function isBindPermissionError(err: unknown): boolean {
+  return (
+    typeof err === "object" &&
+    err !== null &&
+    "code" in err &&
+    ((err as NodeJS.ErrnoException).code === "EPERM" ||
+      (err as NodeJS.ErrnoException).code === "EACCES")
+  );
+}
+
+async function canBindLoopbackInThisEnvironment(): Promise<boolean> {
+  const server = net.createServer();
+  try {
+    await new Promise<void>((resolve, reject) => {
+      server.once("error", reject);
+      server.listen(0, "127.0.0.1", () => resolve());
+    });
+    return true;
+  } catch (err) {
+    if (isBindPermissionError(err)) {
+      return false;
+    }
+    throw err;
+  } finally {
+    if (server.listening) {
+      await new Promise<void>((resolve, reject) =>
+        server.close((err) => (err ? reject(err) : resolve())),
+      );
+    }
+  }
+}
+
+const describeCanvasHost = (await canBindLoopbackInThisEnvironment()) ? describe : describe.skip;
+
+describeCanvasHost("canvas host", () => {
   const quietRuntime = {
     ...defaultRuntime,
     log: (..._args: Parameters<typeof console.log>) => {},

@@ -4,6 +4,7 @@ import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, test, vi 
 import { WebSocket } from "ws";
 import { withEnvAsync } from "../test-utils/env.js";
 import { GATEWAY_CLIENT_MODES, GATEWAY_CLIENT_NAMES } from "../utils/message-channel.js";
+import { VERSION } from "../version.js";
 import { buildDeviceAuthPayload } from "./device-auth.js";
 import { ConnectErrorDetailCodes } from "./protocol/connect-error-details.js";
 import { PROTOCOL_VERSION } from "./protocol/index.js";
@@ -209,6 +210,9 @@ async function configureTrustedProxyControlUiAuth() {
   await writeConfigFile({
     gateway: {
       trustedProxies: ["127.0.0.1"],
+      controlUi: {
+        allowedOrigins: ["https://localhost"],
+      },
     },
     // oxlint-disable-next-line typescript/no-explicit-any
   } as any);
@@ -382,7 +386,7 @@ describe("gateway server auth/connect", () => {
       ws.close();
     });
 
-    test("connect (req) handshake resolves server version from env precedence", async () => {
+    test("connect (req) handshake resolves server version from runtime precedence", async () => {
       for (const testCase of [
         {
           env: {
@@ -390,7 +394,7 @@ describe("gateway server auth/connect", () => {
             OPENCLAW_SERVICE_VERSION: "2.4.6-service",
             npm_package_version: "1.0.0-package",
           },
-          expectedVersion: "2.4.6-service",
+          expectedVersion: VERSION,
         },
         {
           env: {
@@ -406,7 +410,7 @@ describe("gateway server auth/connect", () => {
             OPENCLAW_SERVICE_VERSION: "\t",
             npm_package_version: "1.0.0-package",
           },
-          expectedVersion: "1.0.0-package",
+          expectedVersion: VERSION,
         },
       ]) {
         await withRuntimeVersionEnv(testCase.env, async () =>
@@ -1042,12 +1046,18 @@ describe("gateway server auth/connect", () => {
   });
 
   test("does not bypass pairing for control ui device identity when insecure auth is enabled", async () => {
-    testState.gatewayControlUi = { allowInsecureAuth: true };
+    testState.gatewayControlUi = {
+      allowInsecureAuth: true,
+      allowedOrigins: ["https://localhost"],
+    };
     testState.gatewayAuth = { mode: "token", token: "secret" };
     const { writeConfigFile } = await import("../config/config.js");
     await writeConfigFile({
       gateway: {
         trustedProxies: ["127.0.0.1"],
+        controlUi: {
+          allowedOrigins: ["https://localhost"],
+        },
       },
       // oxlint-disable-next-line typescript/no-explicit-any
     } as any);

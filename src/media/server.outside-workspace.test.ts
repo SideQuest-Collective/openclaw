@@ -1,5 +1,5 @@
 import fs from "node:fs/promises";
-import type { AddressInfo } from "node:net";
+import net, { type AddressInfo } from "node:net";
 import os from "node:os";
 import path from "node:path";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
@@ -31,8 +31,44 @@ vi.mock("./store.js", async (importOriginal) => {
 const { SafeOpenError } = await import("../infra/fs-safe.js");
 const { startMediaServer } = await import("./server.js");
 
-describe("media server outside-workspace mapping", () => {
-  let server: Awaited<ReturnType<typeof startMediaServer>>;
+function isBindPermissionError(err: unknown): boolean {
+  return (
+    typeof err === "object" &&
+    err !== null &&
+    "code" in err &&
+    ((err as NodeJS.ErrnoException).code === "EPERM" ||
+      (err as NodeJS.ErrnoException).code === "EACCES")
+  );
+}
+
+async function canBindLoopbackInThisEnvironment(): Promise<boolean> {
+  const server = net.createServer();
+  try {
+    await new Promise<void>((resolve, reject) => {
+      server.once("error", reject);
+      server.listen(0, "127.0.0.1", () => resolve());
+    });
+    return true;
+  } catch (err) {
+    if (isBindPermissionError(err)) {
+      return false;
+    }
+    throw err;
+  } finally {
+    if (server.listening) {
+      await new Promise<void>((resolve, reject) =>
+        server.close((err) => (err ? reject(err) : resolve())),
+      );
+    }
+  }
+}
+
+const describeMediaOutsideWorkspace = (await canBindLoopbackInThisEnvironment())
+  ? describe
+  : describe.skip;
+
+describeMediaOutsideWorkspace("media server outside-workspace mapping", () => {
+  let server: Awaited<ReturnType<typeof startMediaServer>> | null = null;
   let port = 0;
 
   beforeAll(async () => {
@@ -42,7 +78,9 @@ describe("media server outside-workspace mapping", () => {
   });
 
   afterAll(async () => {
-    await new Promise((resolve) => server.close(resolve));
+    if (server) {
+      await new Promise((resolve) => server?.close(resolve));
+    }
     await fs.rm(mediaDir, { recursive: true, force: true });
     mediaDir = "";
   });

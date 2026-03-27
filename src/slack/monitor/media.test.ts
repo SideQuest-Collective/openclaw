@@ -176,6 +176,22 @@ describe("resolveSlackMedia", () => {
     mockFetch = vi.fn();
     globalThis.fetch = withFetchPreconnect(mockFetch);
     mockPinnedHostnameResolution();
+    vi.spyOn(mediaFetch, "fetchRemoteMedia").mockImplementation(
+      async ({ url, fetchImpl, filePathHint }) => {
+        if (!fetchImpl) {
+          throw new Error("expected fetch implementation");
+        }
+        const response = await fetchImpl(url);
+        if (!response.ok) {
+          throw new Error(`HTTP ${response.status}`);
+        }
+        return {
+          buffer: Buffer.from(await response.arrayBuffer()),
+          contentType: response.headers.get("content-type") ?? undefined,
+          fileName: filePathHint,
+        };
+      },
+    );
   });
 
   afterEach(() => {

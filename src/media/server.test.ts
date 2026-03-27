@@ -1,5 +1,5 @@
 import fs from "node:fs/promises";
-import type { AddressInfo } from "node:net";
+import net, { type AddressInfo } from "node:net";
 import os from "node:os";
 import path from "node:path";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
@@ -19,6 +19,40 @@ vi.mock("./store.js", async (importOriginal) => {
 const { startMediaServer } = await import("./server.js");
 const { MEDIA_MAX_BYTES } = await import("./store.js");
 
+function isBindPermissionError(err: unknown): boolean {
+  return (
+    typeof err === "object" &&
+    err !== null &&
+    "code" in err &&
+    ((err as NodeJS.ErrnoException).code === "EPERM" ||
+      (err as NodeJS.ErrnoException).code === "EACCES")
+  );
+}
+
+async function canBindLoopbackInThisEnvironment(): Promise<boolean> {
+  const server = net.createServer();
+  try {
+    await new Promise<void>((resolve, reject) => {
+      server.once("error", reject);
+      server.listen(0, "127.0.0.1", () => resolve());
+    });
+    return true;
+  } catch (err) {
+    if (isBindPermissionError(err)) {
+      return false;
+    }
+    throw err;
+  } finally {
+    if (server.listening) {
+      await new Promise<void>((resolve, reject) =>
+        server.close((err) => (err ? reject(err) : resolve())),
+      );
+    }
+  }
+}
+
+const describeMediaServer = (await canBindLoopbackInThisEnvironment()) ? describe : describe.skip;
+
 async function waitForFileRemoval(filePath: string, maxTicks = 1000) {
   for (let tick = 0; tick < maxTicks; tick += 1) {
     try {
@@ -31,8 +65,8 @@ async function waitForFileRemoval(filePath: string, maxTicks = 1000) {
   throw new Error(`timed out waiting for ${filePath} removal`);
 }
 
-describe("media server", () => {
-  let server: Awaited<ReturnType<typeof startMediaServer>>;
+describeMediaServer("media server", () => {
+  let server: Awaited<ReturnType<typeof startMediaServer>> | null = null;
   let port = 0;
 
   function mediaUrl(id: string) {
@@ -52,7 +86,9 @@ describe("media server", () => {
   });
 
   afterAll(async () => {
-    await new Promise((r) => server.close(r));
+    if (server) {
+      await new Promise((r) => server?.close(r));
+    }
     await fs.rm(MEDIA_DIR, { recursive: true, force: true });
     MEDIA_DIR = "";
   });

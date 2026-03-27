@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import * as authModule from "../agents/model-auth.js";
 import { DEFAULT_GEMINI_EMBEDDING_MODEL } from "./embeddings-gemini.js";
 import { createEmbeddingProvider, DEFAULT_LOCAL_MODEL } from "./embeddings.js";
+import { withRemoteHttpResponse } from "./remote-http.js";
 
 vi.mock("../agents/model-auth.js", async () => {
   const { createModelAuthMockModule } = await import("../test-utils/model-auth-mock.js");
@@ -12,29 +13,36 @@ const importNodeLlamaCppMock = vi.fn();
 vi.mock("./node-llama.js", () => ({
   importNodeLlamaCpp: (...args: unknown[]) => importNodeLlamaCppMock(...args),
 }));
+vi.mock("./remote-http.js", async () => {
+  const actual = await vi.importActual<typeof import("./remote-http.js")>("./remote-http.js");
+  return {
+    ...actual,
+    withRemoteHttpResponse: vi.fn(),
+  };
+});
 
-const createFetchMock = () =>
-  vi.fn(async (_input?: unknown, _init?: unknown) => ({
-    ok: true,
+const withRemoteHttpResponseMock = vi.mocked(withRemoteHttpResponse);
+
+function createJsonResponse(payload: unknown): Response {
+  return new Response(JSON.stringify(payload), {
     status: 200,
-    json: async () => ({ data: [{ embedding: [1, 2, 3] }] }),
-  }));
+    headers: { "Content-Type": "application/json" },
+  });
+}
 
-const createGeminiFetchMock = () =>
-  vi.fn(async (_input?: unknown, _init?: unknown) => ({
-    ok: true,
-    status: 200,
-    json: async () => ({ embedding: { values: [1, 2, 3] } }),
-  }));
+function mockEmbeddingsResponse(payload: unknown): void {
+  withRemoteHttpResponseMock.mockImplementation(async (params) => {
+    return await params.onResponse(createJsonResponse(payload));
+  });
+}
 
-function readFirstFetchRequest(fetchMock: { mock: { calls: unknown[][] } }) {
-  const [url, init] = fetchMock.mock.calls[0] ?? [];
-  return { url, init: init as RequestInit | undefined };
+function readFirstRemoteRequest() {
+  const [params] = withRemoteHttpResponseMock.mock.calls[0] ?? [];
+  return params as { url: string; init?: RequestInit };
 }
 
 afterEach(() => {
   vi.resetAllMocks();
-  vi.unstubAllGlobals();
 });
 
 function requireProvider(result: Awaited<ReturnType<typeof createEmbeddingProvider>>) {
@@ -90,8 +98,7 @@ function createAutoProvider(model = "") {
 
 describe("embedding provider remote overrides", () => {
   it("uses remote baseUrl/apiKey and merges headers", async () => {
-    const fetchMock = createFetchMock();
-    vi.stubGlobal("fetch", fetchMock);
+    mockEmbeddingsResponse({ data: [{ embedding: [1, 2, 3] }] });
     mockResolvedProviderKey("provider-key");
 
     const cfg = {
@@ -127,8 +134,7 @@ describe("embedding provider remote overrides", () => {
     await provider.embedQuery("hello");
 
     expect(authModule.resolveApiKeyForProvider).not.toHaveBeenCalled();
-    const url = fetchMock.mock.calls[0]?.[0];
-    const init = fetchMock.mock.calls[0]?.[1] as RequestInit | undefined;
+    const { url, init } = readFirstRemoteRequest();
     expect(url).toBe("https://example.com/v1/embeddings");
     const headers = (init?.headers ?? {}) as Record<string, string>;
     expect(headers.Authorization).toBe("Bearer remote-key");
@@ -139,8 +145,7 @@ describe("embedding provider remote overrides", () => {
   });
 
   it("falls back to resolved api key when remote apiKey is blank", async () => {
-    const fetchMock = createFetchMock();
-    vi.stubGlobal("fetch", fetchMock);
+    mockEmbeddingsResponse({ data: [{ embedding: [1, 2, 3] }] });
     mockResolvedProviderKey("provider-key");
 
     const cfg = {
@@ -168,14 +173,13 @@ describe("embedding provider remote overrides", () => {
     await provider.embedQuery("hello");
 
     expect(authModule.resolveApiKeyForProvider).toHaveBeenCalledTimes(1);
-    const init = fetchMock.mock.calls[0]?.[1] as RequestInit | undefined;
+    const { init } = readFirstRemoteRequest();
     const headers = (init?.headers as Record<string, string>) ?? {};
     expect(headers.Authorization).toBe("Bearer provider-key");
   });
 
   it("builds Gemini embeddings requests with api key header", async () => {
-    const fetchMock = createGeminiFetchMock();
-    vi.stubGlobal("fetch", fetchMock);
+    mockEmbeddingsResponse({ embedding: { values: [1, 2, 3] } });
     mockResolvedProviderKey("provider-key");
 
     const cfg = {
@@ -201,7 +205,7 @@ describe("embedding provider remote overrides", () => {
     const provider = requireProvider(result);
     await provider.embedQuery("hello");
 
-    const { url, init } = readFirstFetchRequest(fetchMock);
+    const { url, init } = readFirstRemoteRequest();
     expect(url).toBe(
       "https://generativelanguage.googleapis.com/v1beta/models/text-embedding-004:embedContent",
     );
@@ -211,8 +215,7 @@ describe("embedding provider remote overrides", () => {
   });
 
   it("builds Mistral embeddings requests with bearer auth", async () => {
-    const fetchMock = createFetchMock();
-    vi.stubGlobal("fetch", fetchMock);
+    mockEmbeddingsResponse({ data: [{ embedding: [1, 2, 3] }] });
     mockResolvedProviderKey("provider-key");
 
     const cfg = {
@@ -238,7 +241,7 @@ describe("embedding provider remote overrides", () => {
     const provider = requireProvider(result);
     await provider.embedQuery("hello");
 
-    const { url, init } = readFirstFetchRequest(fetchMock);
+    const { url, init } = readFirstRemoteRequest();
     expect(url).toBe("https://api.mistral.ai/v1/embeddings");
     const headers = (init?.headers ?? {}) as Record<string, string>;
     expect(headers.Authorization).toBe("Bearer mistral-key");
@@ -261,8 +264,7 @@ describe("embedding provider auto selection", () => {
   });
 
   it("uses gemini when openai is missing", async () => {
-    const fetchMock = createGeminiFetchMock();
-    vi.stubGlobal("fetch", fetchMock);
+    mockEmbeddingsResponse({ embedding: { values: [1, 2, 3] } });
     vi.mocked(authModule.resolveApiKeyForProvider).mockImplementation(async ({ provider }) => {
       if (provider === "openai") {
         throw new Error('No API key found for provider "openai".');
@@ -276,19 +278,14 @@ describe("embedding provider auto selection", () => {
     const result = await createAutoProvider();
     const provider = expectAutoSelectedProvider(result, "gemini");
     await provider.embedQuery("hello");
-    const [url] = fetchMock.mock.calls[0] ?? [];
+    const { url } = readFirstRemoteRequest();
     expect(url).toBe(
       `https://generativelanguage.googleapis.com/v1beta/models/${DEFAULT_GEMINI_EMBEDDING_MODEL}:embedContent`,
     );
   });
 
   it("keeps explicit model when openai is selected", async () => {
-    const fetchMock = vi.fn(async (_input?: unknown, _init?: unknown) => ({
-      ok: true,
-      status: 200,
-      json: async () => ({ data: [{ embedding: [1, 2, 3] }] }),
-    }));
-    vi.stubGlobal("fetch", fetchMock);
+    mockEmbeddingsResponse({ data: [{ embedding: [1, 2, 3] }] });
     vi.mocked(authModule.resolveApiKeyForProvider).mockImplementation(async ({ provider }) => {
       if (provider === "openai") {
         return { apiKey: "openai-key", source: "env: OPENAI_API_KEY", mode: "api-key" };
@@ -307,16 +304,14 @@ describe("embedding provider auto selection", () => {
     const provider = requireProvider(result);
     expect(provider.id).toBe("openai");
     await provider.embedQuery("hello");
-    const url = fetchMock.mock.calls[0]?.[0];
-    const init = fetchMock.mock.calls[0]?.[1] as RequestInit | undefined;
+    const { url, init } = readFirstRemoteRequest();
     expect(url).toBe("https://api.openai.com/v1/embeddings");
     const payload = JSON.parse(init?.body as string) as { model?: string };
     expect(payload.model).toBe("text-embedding-3-small");
   });
 
   it("uses mistral when openai/gemini/voyage are missing", async () => {
-    const fetchMock = createFetchMock();
-    vi.stubGlobal("fetch", fetchMock);
+    mockEmbeddingsResponse({ data: [{ embedding: [1, 2, 3] }] });
     vi.mocked(authModule.resolveApiKeyForProvider).mockImplementation(async ({ provider }) => {
       if (provider === "mistral") {
         return { apiKey: "mistral-key", source: "env: MISTRAL_API_KEY", mode: "api-key" };
@@ -327,7 +322,7 @@ describe("embedding provider auto selection", () => {
     const result = await createAutoProvider();
     const provider = expectAutoSelectedProvider(result, "mistral");
     await provider.embedQuery("hello");
-    const [url] = fetchMock.mock.calls[0] ?? [];
+    const { url } = readFirstRemoteRequest();
     expect(url).toBe("https://api.mistral.ai/v1/embeddings");
   });
 });
@@ -335,9 +330,7 @@ describe("embedding provider auto selection", () => {
 describe("embedding provider local fallback", () => {
   it("falls back to openai when node-llama-cpp is missing", async () => {
     mockMissingLocalEmbeddingDependency();
-
-    const fetchMock = createFetchMock();
-    vi.stubGlobal("fetch", fetchMock);
+    mockEmbeddingsResponse({ data: [{ embedding: [1, 2, 3] }] });
 
     mockResolvedProviderKey("provider-key");
 

@@ -17,9 +17,45 @@ import {
   PortInUseError,
 } from "./ports.js";
 
-const describeUnix = process.platform === "win32" ? describe.skip : describe;
+function isBindPermissionError(err: unknown): boolean {
+  return (
+    typeof err === "object" &&
+    err !== null &&
+    "code" in err &&
+    ((err as NodeJS.ErrnoException).code === "EPERM" ||
+      (err as NodeJS.ErrnoException).code === "EACCES")
+  );
+}
 
-describe("ports helpers", () => {
+async function canBindLoopbackInThisEnvironment(): Promise<boolean> {
+  const server = net.createServer();
+  try {
+    await new Promise<void>((resolve, reject) => {
+      server.once("error", reject);
+      server.listen(0, "127.0.0.1", () => resolve());
+    });
+    return true;
+  } catch (err) {
+    if (isBindPermissionError(err)) {
+      return false;
+    }
+    throw err;
+  } finally {
+    if (server.listening) {
+      await new Promise<void>((resolve, reject) =>
+        server.close((err) => (err ? reject(err) : resolve())),
+      );
+    }
+  }
+}
+
+const describeWithLoopback = (await canBindLoopbackInThisEnvironment()) ? describe : describe.skip;
+const describeUnixWithLoopback =
+  process.platform === "win32" || !(await canBindLoopbackInThisEnvironment())
+    ? describe.skip
+    : describe;
+
+describeWithLoopback("ports helpers", () => {
   it("ensurePortAvailable rejects when port busy", async () => {
     const server = net.createServer();
     await new Promise<void>((resolve) => server.listen(0, () => resolve()));
@@ -89,7 +125,7 @@ describe("ports helpers", () => {
   });
 });
 
-describeUnix("inspectPortUsage", () => {
+describeUnixWithLoopback("inspectPortUsage", () => {
   beforeEach(() => {
     runCommandWithTimeoutMock.mockClear();
   });

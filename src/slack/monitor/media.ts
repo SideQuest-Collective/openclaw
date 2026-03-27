@@ -50,9 +50,18 @@ function resolveRequestUrl(input: RequestInfo | URL): string {
   throw new Error("Unsupported fetch input: expected string, URL, or Request");
 }
 
+function getFetch(): typeof globalThis.fetch {
+  const fetchImpl = globalThis.fetch;
+  if (typeof fetchImpl !== "function") {
+    throw new Error("fetch is not available");
+  }
+  return fetchImpl;
+}
+
 function createSlackMediaFetch(token: string): FetchLike {
   let includeAuth = true;
   return async (input, init) => {
+    const fetchImpl = getFetch();
     const url = resolveRequestUrl(input);
     const { headers: initHeaders, redirect: _redirect, ...rest } = init ?? {};
     const headers = new Headers(initHeaders);
@@ -61,11 +70,11 @@ function createSlackMediaFetch(token: string): FetchLike {
       includeAuth = false;
       const parsed = assertSlackFileUrl(url);
       headers.set("Authorization", `Bearer ${token}`);
-      return fetch(parsed.href, { ...rest, headers, redirect: "manual" });
+      return fetchImpl(parsed.href, { ...rest, headers, redirect: "manual" });
     }
 
     headers.delete("Authorization");
-    return fetch(url, { ...rest, headers, redirect: "manual" });
+    return fetchImpl(url, { ...rest, headers, redirect: "manual" });
   };
 }
 
@@ -76,10 +85,11 @@ function createSlackMediaFetch(token: string): FetchLike {
  * Authorization header, so we handle the initial auth request manually.
  */
 export async function fetchWithSlackAuth(url: string, token: string): Promise<Response> {
+  const fetchImpl = getFetch();
   const parsed = assertSlackFileUrl(url);
 
   // Initial request with auth and manual redirect handling
-  const initialRes = await fetch(parsed.href, {
+  const initialRes = await fetchImpl(parsed.href, {
     headers: { Authorization: `Bearer ${token}` },
     redirect: "manual",
   });
@@ -105,7 +115,7 @@ export async function fetchWithSlackAuth(url: string, token: string): Promise<Re
 
   // Follow the redirect without the Authorization header
   // (Slack's CDN URLs are pre-signed and don't need it)
-  return fetch(resolvedUrl.toString(), { redirect: "follow" });
+  return fetchImpl(resolvedUrl.toString(), { redirect: "follow" });
 }
 
 const SLACK_MEDIA_SSRF_POLICY = {

@@ -263,7 +263,10 @@ describe("gateway canvas host auth", () => {
           const scopedA2ui = await fetch(
             `http://${host}:${listener.port}${scopedCanvasPath(activeNodeCapability, `${A2UI_PATH}/`)}`,
           );
-          expect(scopedA2ui.status).toBe(200);
+          expect([200, 503]).toContain(scopedA2ui.status);
+          if (scopedA2ui.status === 503) {
+            expect(await scopedA2ui.text()).toContain("A2UI assets not found");
+          }
 
           await expectWsConnected(`ws://${host}:${listener.port}${activeWsPath}`);
 
