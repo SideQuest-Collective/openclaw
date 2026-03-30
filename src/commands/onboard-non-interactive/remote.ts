@@ -6,6 +6,22 @@ import type { RuntimeEnv } from "../../runtime.js";
 import { applyWizardMetadata } from "../onboard-helpers.js";
 import type { OnboardOptions } from "../onboard-types.js";
 
+function throwIfAborted(signal?: AbortSignal): void {
+  if (!signal?.aborted) {
+    return;
+  }
+  const reason = signal.reason;
+  if (reason instanceof Error) {
+    reason.name = "AbortError";
+    throw reason;
+  }
+  const error = new Error(
+    typeof reason === "string" && reason.trim() ? reason.trim() : "Onboarding aborted.",
+  );
+  error.name = "AbortError";
+  throw error;
+}
+
 export async function runNonInteractiveOnboardingRemote(params: {
   opts: OnboardOptions;
   runtime: RuntimeEnv;
@@ -13,6 +29,7 @@ export async function runNonInteractiveOnboardingRemote(params: {
 }) {
   const { opts, runtime, baseConfig } = params;
   const mode = "remote" as const;
+  throwIfAborted(opts.abortSignal);
 
   const remoteUrl = opts.remoteUrl?.trim();
   if (!remoteUrl) {
@@ -33,7 +50,9 @@ export async function runNonInteractiveOnboardingRemote(params: {
     },
   };
   nextConfig = applyWizardMetadata(nextConfig, { command: "onboard", mode });
+  throwIfAborted(opts.abortSignal);
   await writeConfigFile(nextConfig);
+  throwIfAborted(opts.abortSignal);
   logConfigUpdated(runtime);
 
   const payload = {

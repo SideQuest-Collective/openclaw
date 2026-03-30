@@ -19,6 +19,22 @@ import { logNonInteractiveOnboardingJson } from "./local/output.js";
 import { applyNonInteractiveSkillsConfig } from "./local/skills-config.js";
 import { resolveNonInteractiveWorkspaceDir } from "./local/workspace.js";
 
+function throwIfAborted(signal?: AbortSignal): void {
+  if (!signal?.aborted) {
+    return;
+  }
+  const reason = signal.reason;
+  if (reason instanceof Error) {
+    reason.name = "AbortError";
+    throw reason;
+  }
+  const error = new Error(
+    typeof reason === "string" && reason.trim() ? reason.trim() : "Onboarding aborted.",
+  );
+  error.name = "AbortError";
+  throw error;
+}
+
 export async function runNonInteractiveOnboardingLocal(params: {
   opts: OnboardOptions;
   runtime: RuntimeEnv;
@@ -26,6 +42,7 @@ export async function runNonInteractiveOnboardingLocal(params: {
 }) {
   const { opts, runtime, baseConfig } = params;
   const mode = "local" as const;
+  throwIfAborted(opts.abortSignal);
 
   const workspaceDir = resolveNonInteractiveWorkspaceDir({
     opts,
@@ -49,6 +66,7 @@ export async function runNonInteractiveOnboardingLocal(params: {
   }
   const authChoice = opts.authChoice ?? inferredAuthChoice.choice ?? "skip";
   if (authChoice !== "skip") {
+    throwIfAborted(opts.abortSignal);
     const { applyNonInteractiveAuthChoice } = await import("./local/auth-choice.js");
     const nextConfigAfterAuth = await applyNonInteractiveAuthChoice({
       nextConfig,
@@ -61,6 +79,7 @@ export async function runNonInteractiveOnboardingLocal(params: {
       return;
     }
     nextConfig = nextConfigAfterAuth;
+    throwIfAborted(opts.abortSignal);
   }
 
   const gatewayBasePort = resolveGatewayPort(baseConfig);
@@ -78,14 +97,19 @@ export async function runNonInteractiveOnboardingLocal(params: {
   nextConfig = applyNonInteractiveSkillsConfig({ nextConfig, opts, runtime });
 
   nextConfig = applyWizardMetadata(nextConfig, { command: "onboard", mode });
+  throwIfAborted(opts.abortSignal);
   await writeConfigFile(nextConfig);
+  throwIfAborted(opts.abortSignal);
   logConfigUpdated(runtime);
 
+  throwIfAborted(opts.abortSignal);
   await ensureWorkspaceAndSessions(workspaceDir, runtime, {
     skipBootstrap: Boolean(nextConfig.agents?.defaults?.skipBootstrap),
   });
+  throwIfAborted(opts.abortSignal);
 
   if (opts.installDaemon) {
+    throwIfAborted(opts.abortSignal);
     const { installGatewayDaemonNonInteractive } = await import("./local/daemon-install.js");
     await installGatewayDaemonNonInteractive({
       nextConfig,
@@ -94,10 +118,12 @@ export async function runNonInteractiveOnboardingLocal(params: {
       port: gatewayResult.port,
       gatewayToken: gatewayResult.gatewayToken,
     });
+    throwIfAborted(opts.abortSignal);
   }
 
   const daemonRuntimeRaw = opts.daemonRuntime ?? DEFAULT_GATEWAY_DAEMON_RUNTIME;
   if (!opts.skipHealth) {
+    throwIfAborted(opts.abortSignal);
     const { healthCommand } = await import("../health.js");
     const links = resolveControlUiLinks({
       bind: gatewayResult.bind as "auto" | "lan" | "loopback" | "custom" | "tailnet",
@@ -110,7 +136,9 @@ export async function runNonInteractiveOnboardingLocal(params: {
       token: gatewayResult.gatewayToken,
       deadlineMs: 15_000,
     });
+    throwIfAborted(opts.abortSignal);
     await healthCommand({ json: false, timeoutMs: 10_000 }, runtime);
+    throwIfAborted(opts.abortSignal);
   }
 
   logNonInteractiveOnboardingJson({

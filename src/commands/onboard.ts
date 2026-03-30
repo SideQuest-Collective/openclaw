@@ -12,8 +12,25 @@ import type { OnboardOptions, ResetScope } from "./onboard-types.js";
 
 const VALID_RESET_SCOPES = new Set<ResetScope>(["config", "config+creds+sessions", "full"]);
 
+function throwIfAborted(signal?: AbortSignal): void {
+  if (!signal?.aborted) {
+    return;
+  }
+  const reason = signal.reason;
+  if (reason instanceof Error) {
+    reason.name = "AbortError";
+    throw reason;
+  }
+  const error = new Error(
+    typeof reason === "string" && reason.trim() ? reason.trim() : "Onboarding aborted.",
+  );
+  error.name = "AbortError";
+  throw error;
+}
+
 export async function onboardCommand(opts: OnboardOptions, runtime: RuntimeEnv = defaultRuntime) {
   assertSupportedRuntime(runtime);
+  throwIfAborted(opts.abortSignal);
   const originalAuthChoice = opts.authChoice;
   const normalizedAuthChoice = normalizeLegacyOnboardAuthChoice(originalAuthChoice);
   if (opts.nonInteractive && isDeprecatedAuthChoice(originalAuthChoice)) {
@@ -66,12 +83,14 @@ export async function onboardCommand(opts: OnboardOptions, runtime: RuntimeEnv =
   }
 
   if (normalizedOpts.reset) {
+    throwIfAborted(normalizedOpts.abortSignal);
     const snapshot = await readConfigFileSnapshot();
     const baseConfig = snapshot.valid ? snapshot.config : {};
     const workspaceDefault =
       normalizedOpts.workspace ?? baseConfig.agents?.defaults?.workspace ?? DEFAULT_WORKSPACE;
     const resetScope: ResetScope = normalizedOpts.resetScope ?? "config+creds+sessions";
     await handleReset(resetScope, resolveUserPath(workspaceDefault), runtime);
+    throwIfAborted(normalizedOpts.abortSignal);
   }
 
   if (process.platform === "win32") {
@@ -86,10 +105,13 @@ export async function onboardCommand(opts: OnboardOptions, runtime: RuntimeEnv =
   }
 
   if (normalizedOpts.nonInteractive) {
+    throwIfAborted(normalizedOpts.abortSignal);
     await runNonInteractiveOnboarding(normalizedOpts, runtime);
+    throwIfAborted(normalizedOpts.abortSignal);
     return;
   }
 
+  throwIfAborted(normalizedOpts.abortSignal);
   await runInteractiveOnboarding(normalizedOpts, runtime);
 }
 

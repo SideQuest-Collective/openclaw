@@ -88,6 +88,7 @@ export type ProviderChoice = ChannelChoice;
 export type SecretInputMode = "plaintext" | "ref";
 
 export type OnboardOptions = {
+  abortSignal?: AbortSignal;
   mode?: OnboardMode;
   /** "manual" is an alias for "advanced". */
   flow?: "quickstart" | "advanced" | "manual";
