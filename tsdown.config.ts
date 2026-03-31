@@ -103,6 +103,16 @@ export default defineConfig([
     platform: "node" as const,
   })),
   {
+    entry: {
+      "openai-codex-oauth": "src/commands/openai-codex-oauth.ts",
+      onboard: "src/commands/onboard.ts",
+    },
+    outDir: "dist/commands",
+    env,
+    fixedExtension: false,
+    platform: "node",
+  },
+  {
     entry: "src/extensionAPI.ts",
     env,
     fixedExtension: false,
