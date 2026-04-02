@@ -107,7 +107,9 @@ RUN pnpm ui:build
 # Expose the CLI binary without requiring npm global writes as non-root.
 USER root
 RUN ln -sf /app/openclaw.mjs /usr/local/bin/openclaw \
- && chmod 755 /app/openclaw.mjs
+ && chmod 755 /app/openclaw.mjs \
+ && mkdir -p /home/node/.openclaw \
+ && chown node:node /home/node/.openclaw
 
 ENV NODE_ENV=production
 
